@@ -125,18 +125,49 @@
                     </div>
 
                     <!-- 7-Day Live Matrix Layout Grid -->
-                    <div class="grid grid-cols-2 sm:grid-cols-4 md:grid-cols-7 gap-3">
-                        <template x-for="day in cateringWeek" :key="day.dbKey">
-                            <div @click="openCateringModal(day)"
-                                 :class="hasCateringEvent(day.dbKey) ? 'bg-rose-100 border-rose-400 text-rose-900 font-bold' : 'bg-white border-slate-200 text-slate-700'"
-                                 class="border rounded-xl p-3 text-center cursor-pointer transition transform hover:-translate-y-0.5 hover:shadow-sm">
-                                <div class="text-[10px] opacity-70 uppercase tracking-wider" x-text="day.label"></div>
-                                <div class="mt-2 text-xs flex items-center justify-center gap-1">
-                                    <span x-text="hasCateringEvent(day.dbKey) ? '🚨 Scheduled' : 'Clear'"></span>
-                                </div>
-                            </div>
-                        </template>
-                    </div>
+                    <!-- Place this inside your main content layout div -->
+<div x-data="{ 
+    sessionDate: '',
+    sessions: [
+        { personName: '', sessionTime: '' },
+        { personName: '', sessionTime: '' }
+    ]
+}" class="max-w-md mx-auto mt-10 p-6 bg-white rounded-lg shadow-md">
+
+    <h2 class="text-xl font-bold mb-4 text-gray-8xl">Schedule Sessions</h2>
+
+    <!-- Main Date Picker -->
+    <div class="mb-6">
+        <label class="block text-sm font-medium text-gray-700 mb-1">Date</label>
+        <input type="date" x-model="sessionDate" class="w-full p-2 border rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500">
+    </div>
+
+    <hr class="mb-6 border-gray-200">
+
+    <!-- Sessions Dynamic Fields -->
+    <template x-for="(session, index) in sessions" :key="index">
+        <div class="mb-6 p-4 bg-gray-50 rounded-md border border-gray-100 relative">
+            <span class="text-xs font-semibold text-indigo-600 uppercase tracking-wider block mb-2" x-text="'Session ' + (index + 1)"></span>
+            
+            <!-- Person Name -->
+            <div class="mb-3">
+                <label class="block text-xs font-medium text-gray-600 mb-1">Person Name</label>
+                <input type="text" x-model="session.personName" placeholder="John Doe" class="w-full p-2 border rounded-md text-sm">
+            </div>
+
+            <!-- Session Time -->
+            <div>
+                <label class="block text-xs font-medium text-gray-600 mb-1">Time of Session</label>
+                <input type="time" x-model="session.sessionTime" class="w-full p-2 border rounded-md text-sm">
+            </div>
+        </div>
+    </template>
+
+    <!-- Submit Button -->
+    <button @click="submitSchedule(sessionDate, sessions)" class="w-full bg-indigo-600 text-white p-2 rounded-md font-medium hover:bg-indigo-700 transition">
+        Save Schedule
+    </button>
+</div>
 
                     <!-- Input Entry Dashboard Area -->
                     <div x-show="currentRole === 'admin' || currentRole === 'order'" class="bg-white border border-slate-200 p-4 rounded-xl space-y-4 shadow-2xs">
