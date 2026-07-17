@@ -131,6 +131,27 @@ window.stockApp = function() {
         showNewItemModal: false,
         showAccountModal: false,
         showUserAdminModal: false,
+
+        // Add helper methods inside your stockApp setup context inside app.js
+window.submitDirectTextCatering = async function(dateString) {
+  if(!this.cateringForm.partyName || !this.cateringForm.rawTextMenu) return alert("Missing required fields.");
+  
+  try {
+    await addDoc(collection(dbFs, "catering_events"), {
+      date: dateString,
+      partyName: this.cateringForm.partyName,
+      paxCount: this.cateringForm.paxCount || 0,
+      menuText: this.cateringForm.rawTextMenu,
+      created_at: Date.now()
+    });
+    // Clear localized tracking data objects
+    this.cateringForm.partyName = '';
+    this.cateringForm.paxCount = '';
+    this.cateringForm.rawTextMenu = '';
+  } catch(e) {
+     console.error("Storage error:", e);
+  }
+};
         
         newItemForm: { name: '', categoryId: '', supplierName: '', threshold: 0, mrp: '' }, 
         newCategoryForm: { name: '', emoji: '📦', paletteIndex: 0 },
