@@ -2,9 +2,6 @@ import { dbFs } from './firebase-config.js';
 import { 
     collection, 
     addDoc, 
-    getDocs, 
-    doc, 
-    setDoc, 
     onSnapshot 
 } from "https://www.gstatic.com/firebasejs/10.13.2/firebase-firestore.js";
 
@@ -76,7 +73,7 @@ document.addEventListener('alpine:init', () => {
                 this.events = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
             });
 
-            // Standard mock local development pass logic mapping:
+            // Auto-bypass auth logic for testing
             this.isAuthenticated = true; 
             this.currentUsername = "Admin Studio Desk";
             this.currentRole = "admin";
@@ -100,7 +97,7 @@ document.addEventListener('alpine:init', () => {
 
         async submitDirectTextCatering(dateString) {
             if (!this.cateringForm.partyName || !this.cateringForm.rawTextMenu) {
-                alert("Please declare event parameters and paste document menu data layout strings.");
+                alert("Please declare event parameters and paste document menu data.");
                 return;
             }
 
@@ -117,7 +114,7 @@ document.addEventListener('alpine:init', () => {
                 payload.id = docRef.id;
                 this.events.push(payload);
 
-                // Reset forms fields values state parameters
+                // Reset forms fields values
                 this.cateringForm.partyName = '';
                 this.cateringForm.paxCount = '';
                 this.cateringForm.rawTextMenu = '';
@@ -129,14 +126,45 @@ document.addEventListener('alpine:init', () => {
             }
         },
 
-        // Placeholder system dependencies logic mapping targets
-        verifyLogin() { this.isAuthenticated = true; },
+        // Auth Logic placeholders to keep standard script balance intact
+        verifyLogin() { 
+            this.isAuthenticated = true; 
+            this.currentUsername = this.loginForm.username || "Operator";
+            this.currentRole = "admin";
+        },
         logout() { this.isAuthenticated = false; },
+        
         get processedItems() {
             if (this.filterCat === 'all') return this.items;
             return this.items.filter(i => i.category_name === this.filterCat);
         },
         get filteredInwardItems() { return this.items; },
-        get filteredOrderDeskItems() { return this.items; }
+        get filteredOrderDeskItems() { return this.items; },
+        
+        // System Actions placeholding blocks
+        changeUserRole() {},
+        promptResetPassword() {},
+        deleteUser() {},
+        createUser() {},
+        submitNewCategory() {},
+        showNewItemModal() {},
+        submitNewItem() {},
+        changeMyPassword() {},
+        addInward() {},
+        deductOutward() {},
+        addItemToOrder() {},
+        removeOrderBasketItem() {},
+        sendWhatsAppOrder() {},
+        approveIncomingOrder() {},
+        declineIncomingOrder() {},
+        downloadInwardSupplierReport() {},
+        downloadExcelReport() {},
+        shiftOrder() {},
+        changeItemName() {},
+        modifyThreshold() {},
+        purgeItem() {},
+        undoLastTransaction() {},
+        triggerUndo() {},
+        isWithin30Minutes() { return false; }
     }));
 });
