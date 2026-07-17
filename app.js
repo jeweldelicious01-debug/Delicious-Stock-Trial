@@ -13,6 +13,24 @@ import {
 const SESSION_KEY = 'restaurantStockSession_v1';
 const colRef = (name) => collection(dbFs, name);
 
+async function submitSchedule(date, sessionsArray) {
+  try {
+    for (let session of sessionsArray) {
+      if (session.personName && session.sessionTime) {
+        await addDoc(collection(dbFs, "appointments"), {
+          date: date,
+          personName: session.personName,
+          sessionTime: session.sessionTime
+        });
+      }
+    }
+    console.log("All individual sessions logged successfully.");
+  } catch (error) {
+    console.error("Error logging sessions:", error);
+  }
+}
+window.submitSchedule = submitSchedule;
+
 async function sha256(text) {
     const enc = new TextEncoder().encode(text);
     const hashBuf = await crypto.subtle.digest('SHA-256', enc);
