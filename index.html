@@ -189,9 +189,10 @@
                                 </div>
                             </div>
                             
-                            <button type="submit" class="bg-slate-800 hover:bg-slate-900 text-white font-bold text-[11px] px-4 py-2 rounded-lg shadow-sm uppercase transition tracking-wider">
-                                Push Scheduled Matrix to Cloud
-                            </button>
+                            <!-- UPDATE THIS LINE IN YOUR INDEX.HTML -->
+<button @click.prevent="submitSchedule(sessionDate, sessions)" class="w-full bg-indigo-600 text-white p-2 rounded-md font-medium hover:bg-indigo-700 transition">
+    Save Schedule
+</button>
                         </form>
                     </div>
                 </section>
