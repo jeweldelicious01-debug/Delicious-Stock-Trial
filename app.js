@@ -118,6 +118,25 @@ document.addEventListener('alpine:init', () => {
                 alert("Operation failed. Verify Firebase connection status permissions.");
             }
         },
+        async changeUserRole(userId, newRole) {
+    try {
+        // Update the specific user document in the "users" collection on Firestore
+        await setDoc(doc(dbFs, "users", userId), {
+            role: newRole
+        }, { merge: true });
+
+        // Update the local state array immediately so the UI reflects the changes instantly
+        const idx = this.users.findIndex(u => u.id === userId);
+        if (idx !== -1) {
+            this.users[idx].role = newRole;
+        }
+
+        alert(`Operator privileges successfully escalated/de-escalated to: ${newRole}`);
+    } catch (err) {
+        console.error("Failed to mutate user configuration:", err);
+        alert("Permission denied or database offline. Verify your Firestore Rules.");
+    }
+},
 
         async submitDirectTextCatering(dateString) {
             if (!this.cateringForm.partyName || !this.cateringForm.rawTextMenu) {
