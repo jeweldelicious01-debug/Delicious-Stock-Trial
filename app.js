@@ -23,6 +23,7 @@ document.addEventListener('alpine:init', () => {
         showAccountModal: false,
         showUserAdminModal: false,
         showNewItemModal: false,
+        creationView: false,
         
         // Form Binding Buffers
         loginForm: { username: '', password: '' },
@@ -82,6 +83,12 @@ document.addEventListener('alpine:init', () => {
 
         // --- EXCEL BULK UPLOAD ENGINE (AUTO-RESOLVING PIPELINE) ---
         async uploadExcelReport(event) {
+            if (this.currentRole !== 'admin' && this.currentRole !== 'inward') {
+                alert("Security Exception: Your operating role scope does not authorize bulk database ingest mutations.");
+                event.target.value = "";
+                return;
+            }
+
             const file = event.target.files[0];
             if (!file) return;
 
@@ -101,7 +108,6 @@ document.addEventListener('alpine:init', () => {
                     let addedItemsCount = 0;
 
                     for (let row of jsonRows) {
-                        // Extract spreadsheet column metrics matching your precise request
                         const rawItemName = row["Item Name"]?.toString().trim();
                         const rawBalance = Number(row["Live Balance"]) || 0;
                         const rawLimit = Number(row["Safety Limit"]) || 0;
@@ -109,9 +115,8 @@ document.addEventListener('alpine:init', () => {
                         const rawCategory = row["Category Axis"]?.toString().trim();
                         const rawSupplier = row["Primary Supplier"]?.toString().trim();
 
-                        if (!rawItemName) continue; // Skip corrupted lines
+                        if (!rawItemName) continue;
 
-                        // 1. Auto-resolve Category Pipeline
                         if (rawCategory && !this.categories.some(c => c.name.toLowerCase() === rawCategory.toLowerCase())) {
                             const newCatRef = await addDoc(collection(dbFs, "categories"), {
                                 name: rawCategory,
@@ -123,12 +128,10 @@ document.addEventListener('alpine:init', () => {
                             this.categories.push({ id: newCatRef.id, name: rawCategory });
                         }
 
-                        // 2. Auto-resolve Supplier Pipeline
                         if (rawSupplier && !this.suppliers.some(s => s.name.toLowerCase() === rawSupplier.toLowerCase())) {
                             await addDoc(collection(dbFs, "suppliers"), { name: rawSupplier });
                         }
 
-                        // 3. Auto-resolve Item Portfolio
                         const itemExists = this.items.some(i => i.name.toLowerCase() === rawItemName.toLowerCase());
                         if (!itemExists) {
                             await addDoc(collection(dbFs, "items"), {
@@ -144,7 +147,7 @@ document.addEventListener('alpine:init', () => {
                     }
 
                     alert(`Ingestion loop completed! Added ${addedItemsCount} brand new products dynamically to your cloud dashboard.`);
-                    event.target.value = ""; // Clear file trigger element data context
+                    event.target.value = "";
                 } catch (err) {
                     console.error("Ingestion crash: ", err);
                     alert("Failed to parse sheet data matrix context cleanly.");
@@ -279,6 +282,26 @@ document.addEventListener('alpine:init', () => {
             XLSX.writeFile(wb, "JewelD_Suppliers_Ledger.xlsx");
         },
 
+        // FIXED LOGOUT REBOOTH REGISTER PIPELINE
+        logout() {
+            this.isAuthenticated = false;
+            this.currentUsername = '';
+            this.currentRole = 'readonly';
+            this.ready = false;
+            this.loginForm.username = '';
+            this.loginForm.password = '';
+            this.loginError = '';
+            
+            // Forces clean state reconstruction
+            window.location.reload();
+        },
+
+        verifyLogin() { 
+            this.isAuthenticated = true; 
+            this.currentUsername = this.loginForm.username || "Operator";
+            this.currentRole = "admin";
+            this.ready = true;
+        },
         addInward() {}, deductOutward() {}, addItemToOrder() {}, removeOrderBasketItem() {},
         sendWhatsAppOrder() {}, approveIncomingOrder() {}, declineIncomingOrder() {}, purgeItem() {}
     }));
