@@ -51,10 +51,13 @@
     <button x-show="currentRole === 'admin'" @click="showUserAdminModal = true" class="text-xs bg-indigo-50 hover:bg-indigo-100 text-indigo-700 px-3 py-2 rounded-lg font-bold tracking-wide border border-indigo-200 transition shadow-sm">🧑‍💼 Operator Suite</button>
     
     <!-- NEW: UPLOAD EXCEL BUTTON MODULE -->
-    <label class="text-xs bg-indigo-600 hover:bg-indigo-700 text-white px-3 py-2 rounded-lg font-bold tracking-wide flex items-center gap-1.5 transition shadow-md cursor-pointer">
-        📥 Ingest Master Excel (.xlsx)
-        <input type="file" accept=".xlsx, .xls" class="hidden" @change="uploadExcelReport($event)">
-    </label>
+    <!-- UPDATE THIS MODULE IN YOUR INDEX.HTML HEADER -->
+<label x-show="currentRole === 'admin' || currentRole === 'inward'"
+       x-cloak
+       class="text-xs bg-indigo-600 hover:bg-indigo-700 text-white px-3 py-2 rounded-lg font-bold tracking-wide flex items-center gap-1.5 transition shadow-md cursor-pointer">
+    📥 Ingest Master Excel (.xlsx)
+    <input type="file" accept=".xlsx, .xls" class="hidden" @change="uploadExcelReport($event)">
+</label>
 
     <button x-show="currentRole !== 'readonly'" @click="downloadInwardSupplierReport()" class="text-xs bg-amber-600 hover:bg-amber-700 text-white px-3 py-2 rounded-lg font-bold tracking-wide flex items-center gap-1.5 transition shadow-md">🧾 Supplier Inward Report (.xlsx)</button>
     <button @click="downloadExcelReport()" class="text-xs bg-emerald-700 hover:bg-emerald-800 text-white px-3 py-2 rounded-lg font-bold tracking-wide flex items-center gap-1.5 transition shadow-md">📊 Export 30-Day Excel (.xlsx)</button>
