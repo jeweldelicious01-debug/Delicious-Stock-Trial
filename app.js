@@ -68,9 +68,9 @@ document.addEventListener('alpine:init', () => {
             });
             onSnapshot(collection(dbFs, "catering_events"), (snapshot) => {
                 this.events = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-                onSnapshot(collection(dbFs, "users"), (snapshot) => {
-    this.users = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-});
+            });
+            onSnapshot(collection(dbFs, "users"), (snapshot) => {
+                this.users = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
             });
 
             // Standard Developer Auth Mode bypass configuration
@@ -121,25 +121,34 @@ document.addEventListener('alpine:init', () => {
                 alert("Operation failed. Verify Firebase connection status permissions.");
             }
         },
+        
         async changeUserRole(userId, newRole) {
-    try {
-        // Update the specific user document in the "users" collection on Firestore
-        await setDoc(doc(dbFs, "users", userId), {
-            role: newRole
-        }, { merge: true });
+            try {
+                await setDoc(doc(dbFs, "users", userId), {
+                    role: newRole
+                }, { merge: true });
 
-        // Update the local state array immediately so the UI reflects the changes instantly
-        const idx = this.users.findIndex(u => u.id === userId);
-        if (idx !== -1) {
-            this.users[idx].role = newRole;
-        }
+                const idx = this.users.findIndex(u => u.id === userId);
+                if (idx !== -1) {
+                    this.users[idx].role = newRole;
+                }
 
-        alert(`Operator privileges successfully escalated/de-escalated to: ${newRole}`);
-    } catch (err) {
-        console.error("Failed to mutate user configuration:", err);
-        alert("Permission denied or database offline. Verify your Firestore Rules.");
-    }
-},
+                alert(`Operator privileges successfully escalated/de-escalated to: ${newRole}`);
+            } catch (err) {
+                console.error("Failed to mutate user configuration:", err);
+                alert("Permission denied or database offline. Verify your Firestore Rules.");
+            }
+        },
+
+        async changeMyPassword() {
+            if (!this.accountForm.currentPassword || !this.accountForm.newPassword) {
+                this.accountError = "All password metrics are required.";
+                return;
+            }
+            this.accountError = "";
+            this.accountSuccess = "Password modified successfully! (Mock confirmation)";
+            setTimeout(() => { this.showAccountModal = false; this.accountSuccess = ""; }, 1500);
+        },
 
         async submitDirectTextCatering(dateString) {
             if (!this.cateringForm.partyName || !this.cateringForm.rawTextMenu) {
