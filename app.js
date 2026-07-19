@@ -68,6 +68,9 @@ document.addEventListener('alpine:init', () => {
             });
             onSnapshot(collection(dbFs, "catering_events"), (snapshot) => {
                 this.events = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+                onSnapshot(collection(dbFs, "users"), (snapshot) => {
+    this.users = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+});
             });
 
             // Standard Developer Auth Mode bypass configuration
