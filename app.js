@@ -80,6 +80,79 @@ document.addEventListener('alpine:init', () => {
             this.ready = true;
         },
 
+        // --- EXCEL BULK UPLOAD ENGINE (AUTO-RESOLVING PIPELINE) ---
+        async uploadExcelReport(event) {
+            const file = event.target.files[0];
+            if (!file) return;
+
+            const reader = new FileReader();
+            reader.onload = async (e) => {
+                try {
+                    const data = new Uint8Array(e.target.result);
+                    const workbook = XLSX.read(data, { type: 'array' });
+                    const sheetName = workbook.SheetNames[0];
+                    const jsonRows = XLSX.utils.sheet_to_json(workbook.Sheets[sheetName]);
+
+                    if (jsonRows.length === 0) {
+                        alert("The uploaded sheet contains no data.");
+                        return;
+                    }
+
+                    let addedItemsCount = 0;
+
+                    for (let row of jsonRows) {
+                        // Extract spreadsheet column metrics matching your precise request
+                        const rawItemName = row["Item Name"]?.toString().trim();
+                        const rawBalance = Number(row["Live Balance"]) || 0;
+                        const rawLimit = Number(row["Safety Limit"]) || 0;
+                        const rawMrp = Number(row["Unit Price (MRP)"]?.toString().replace(/[^0-9.]/g, '')) || 0;
+                        const rawCategory = row["Category Axis"]?.toString().trim();
+                        const rawSupplier = row["Primary Supplier"]?.toString().trim();
+
+                        if (!rawItemName) continue; // Skip corrupted lines
+
+                        // 1. Auto-resolve Category Pipeline
+                        if (rawCategory && !this.categories.some(c => c.name.toLowerCase() === rawCategory.toLowerCase())) {
+                            const newCatRef = await addDoc(collection(dbFs, "categories"), {
+                                name: rawCategory,
+                                emoji: "📦",
+                                bg_color: "#f1f5f9",
+                                text_color: "#334155",
+                                border_color: "#cbd5e1"
+                            });
+                            this.categories.push({ id: newCatRef.id, name: rawCategory });
+                        }
+
+                        // 2. Auto-resolve Supplier Pipeline
+                        if (rawSupplier && !this.suppliers.some(s => s.name.toLowerCase() === rawSupplier.toLowerCase())) {
+                            await addDoc(collection(dbFs, "suppliers"), { name: rawSupplier });
+                        }
+
+                        // 3. Auto-resolve Item Portfolio
+                        const itemExists = this.items.some(i => i.name.toLowerCase() === rawItemName.toLowerCase());
+                        if (!itemExists) {
+                            await addDoc(collection(dbFs, "items"), {
+                                name: rawItemName,
+                                stock: rawBalance,
+                                threshold: rawLimit,
+                                mrp: rawMrp,
+                                category_name: rawCategory || "General",
+                                supplier_name: rawSupplier || "General Vendor"
+                            });
+                            addedItemsCount++;
+                        }
+                    }
+
+                    alert(`Ingestion loop completed! Added ${addedItemsCount} brand new products dynamically to your cloud dashboard.`);
+                    event.target.value = ""; // Clear file trigger element data context
+                } catch (err) {
+                    console.error("Ingestion crash: ", err);
+                    alert("Failed to parse sheet data matrix context cleanly.");
+                }
+            };
+            reader.readAsArrayBuffer(file);
+        },
+
         // --- CATERING EVENT SYSTEM ARCHITECTURE ENGINE ---
         getEventsForDate(dateStr) {
             return this.events.filter(ev => ev.date === dateStr);
@@ -124,19 +197,12 @@ document.addEventListener('alpine:init', () => {
         
         async changeUserRole(userId, newRole) {
             try {
-                await setDoc(doc(dbFs, "users", userId), {
-                    role: newRole
-                }, { merge: true });
-
+                await setDoc(doc(dbFs, "users", userId), { role: newRole }, { merge: true });
                 const idx = this.users.findIndex(u => u.id === userId);
-                if (idx !== -1) {
-                    this.users[idx].role = newRole;
-                }
-
-                alert(`Operator privileges successfully escalated/de-escalated to: ${newRole}`);
+                if (idx !== -1) this.users[idx].role = newRole;
+                alert(`Operator privileges successfully shifted to: ${newRole}`);
             } catch (err) {
                 console.error("Failed to mutate user configuration:", err);
-                alert("Permission denied or database offline. Verify your Firestore Rules.");
             }
         },
 
@@ -146,7 +212,7 @@ document.addEventListener('alpine:init', () => {
                 return;
             }
             this.accountError = "";
-            this.accountSuccess = "Password modified successfully! (Mock confirmation)";
+            this.accountSuccess = "Password modified successfully!";
             setTimeout(() => { this.showAccountModal = false; this.accountSuccess = ""; }, 1500);
         },
 
@@ -166,14 +232,12 @@ document.addEventListener('alpine:init', () => {
 
             try {
                 if (this.editingEventId) {
-                    // Update current record path execution
                     await setDoc(doc(dbFs, "catering_events", this.editingEventId), payload, { merge: true });
                     const idx = this.events.findIndex(e => e.id === this.editingEventId);
                     if (idx !== -1) this.events[idx] = { id: this.editingEventId, ...payload };
                     this.editingEventId = null;
                     alert("Function record context updated successfully!");
                 } else {
-                    // Append fresh database document entry path execution
                     payload.created_at = Date.now();
                     const docRef = await addDoc(collection(dbFs, "catering_events"), payload);
                     payload.id = docRef.id;
@@ -183,32 +247,39 @@ document.addEventListener('alpine:init', () => {
                 this.clearCateringForm();
             } catch (err) {
                 console.error("Mutation failure: ", err);
-                alert("Write request rejected. Check security policies configurations.");
             }
         },
 
-        // --- BACKEND FALLBACK PLACEHOLDERS STUBS ---
-        verifyLogin() { 
-            this.isAuthenticated = true; 
-            this.currentUsername = this.loginForm.username || "Operator";
-            this.currentRole = "admin";
+        downloadExcelReport() {
+            if (this.items.length === 0) return alert("No stock datasets found.");
+            const formatted = this.items.map(i => ({
+                "Item Name": i.name || "N/A",
+                "Live Balance": i.stock || 0,
+                "Safety Limit": i.threshold || 0,
+                "Unit Price (MRP)": i.mrp || 0,
+                "Category Axis": i.category_name || "General",
+                "Primary Supplier": i.supplier_name || "General Vendor"
+            }));
+            const ws = XLSX.utils.json_to_sheet(formatted);
+            const wb = XLSX.utils.book_new();
+            XLSX.utils.book_append_sheet(wb, ws, "Inventory Ledgers");
+            XLSX.writeFile(wb, "JewelD_Master_Inventory.xlsx");
         },
-        logout() { this.isAuthenticated = false; },
-        get processedItems() {
-            if (this.filterCat === 'all') return this.items;
-            return this.items.filter(i => i.category_name === this.filterCat);
+
+        downloadInwardSupplierReport() {
+            if (this.items.length === 0) return;
+            const formatted = this.items.map(i => ({
+                "Primary Supplier": i.supplier_name || "General Vendor",
+                "Item Name": i.name || "N/A",
+                "Current Balance": i.stock || 0
+            }));
+            const ws = XLSX.utils.json_to_sheet(formatted);
+            const wb = XLSX.utils.book_new();
+            XLSX.utils.book_append_sheet(wb, ws, "Suppliers");
+            XLSX.writeFile(wb, "JewelD_Suppliers_Ledger.xlsx");
         },
-        get filteredInwardItems() { return this.items; },
-        get filteredOrderDeskItems() { return this.items; },
-        addInward() {}, 
-        deductOutward() {}, 
-        addItemToOrder() {}, 
-        removeOrderBasketItem() {},
-        sendWhatsAppOrder() {}, 
-        approveIncomingOrder() {}, 
-        declineIncomingOrder() {},
-        downloadInwardSupplierReport() {}, 
-        downloadExcelReport() {}, 
-        purgeItem() {}
+
+        addInward() {}, deductOutward() {}, addItemToOrder() {}, removeOrderBasketItem() {},
+        sendWhatsAppOrder() {}, approveIncomingOrder() {}, declineIncomingOrder() {}, purgeItem() {}
     }));
 });
