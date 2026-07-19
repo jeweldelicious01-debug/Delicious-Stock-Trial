@@ -46,11 +46,20 @@
                         <p class="text-xs text-slate-500">Logged in as <span class="font-bold text-slate-800" x-text="currentUsername"></span> <span class="mx-2 text-slate-300">|</span> Security Scope: <span class="bg-slate-100 text-slate-800 font-bold px-2 py-0.5 rounded text-[10px] uppercase border border-slate-200" x-text="currentRole"></span></p>
                     </div>
                     <div class="flex gap-2 items-center flex-wrap">
-                        <button @click="showAccountModal = true" class="text-xs bg-white hover:bg-slate-50 text-slate-700 border border-slate-200 px-3 py-2 rounded-lg font-bold tracking-wide transition shadow-sm">👤 Security Settings</button>
-                        <button x-show="currentRole === 'admin'" @click="showUserAdminModal = true" class="text-xs bg-indigo-50 hover:bg-indigo-100 text-indigo-700 px-3 py-2 rounded-lg font-bold tracking-wide border border-indigo-200 transition shadow-sm">🧑‍💼 Operator & Category Management Suite</button>
-                        <button x-show="currentRole !== 'readonly'" @click="downloadInwardSupplierReport()" class="text-xs bg-amber-600 hover:bg-amber-700 text-white px-3 py-2 rounded-lg font-bold tracking-wide flex items-center gap-1.5 transition shadow-md">🧾 Supplier Inward Report (.xlsx)</button>
-                        <button @click="downloadExcelReport()" class="text-xs bg-emerald-700 hover:bg-emerald-800 text-white px-3 py-2 rounded-lg font-bold tracking-wide flex items-center gap-1.5 transition shadow-md">📊 Export 30-Day Excel (.xlsx)</button>
-                        <button @click="logout()" class="text-xs bg-rose-50 hover:bg-rose-100 border border-rose-200 text-rose-700 font-bold px-3 py-2 rounded-lg transition">🔒 Close Session</button>
+                        <<div class="flex gap-2 items-center flex-wrap">
+    <button @click="showAccountModal = true" class="text-xs bg-white hover:bg-slate-50 text-slate-700 border border-slate-200 px-3 py-2 rounded-lg font-bold tracking-wide transition shadow-sm">👤 Security Settings</button>
+    <button x-show="currentRole === 'admin'" @click="showUserAdminModal = true" class="text-xs bg-indigo-50 hover:bg-indigo-100 text-indigo-700 px-3 py-2 rounded-lg font-bold tracking-wide border border-indigo-200 transition shadow-sm">🧑‍💼 Operator Suite</button>
+    
+    <!-- NEW: UPLOAD EXCEL BUTTON MODULE -->
+    <label class="text-xs bg-indigo-600 hover:bg-indigo-700 text-white px-3 py-2 rounded-lg font-bold tracking-wide flex items-center gap-1.5 transition shadow-md cursor-pointer">
+        📥 Ingest Master Excel (.xlsx)
+        <input type="file" accept=".xlsx, .xls" class="hidden" @change="uploadExcelReport($event)">
+    </label>
+
+    <button x-show="currentRole !== 'readonly'" @click="downloadInwardSupplierReport()" class="text-xs bg-amber-600 hover:bg-amber-700 text-white px-3 py-2 rounded-lg font-bold tracking-wide flex items-center gap-1.5 transition shadow-md">🧾 Supplier Inward Report (.xlsx)</button>
+    <button @click="downloadExcelReport()" class="text-xs bg-emerald-700 hover:bg-emerald-800 text-white px-3 py-2 rounded-lg font-bold tracking-wide flex items-center gap-1.5 transition shadow-md">📊 Export 30-Day Excel (.xlsx)</button>
+    <button @click="logout()" class="text-xs bg-rose-50 hover:bg-rose-100 border border-rose-200 text-rose-700 font-bold px-3 py-2 rounded-lg transition">🔒 Close Session</button>
+</div>
                     </div>
                 </header>
 
