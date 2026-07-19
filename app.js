@@ -2,12 +2,15 @@ import { dbFs } from './firebase-config.js';
 import { 
     collection, 
     addDoc, 
+    doc, 
+    setDoc, 
+    deleteDoc, 
     onSnapshot 
 } from "https://www.gstatic.com/firebasejs/10.13.2/firebase-firestore.js";
 
 document.addEventListener('alpine:init', () => {
     Alpine.data('stockApp', () => ({
-        // App State Properties
+        // App Core State Properties
         isAuthenticated: false,
         authChecking: false,
         ready: false,
@@ -16,12 +19,12 @@ document.addEventListener('alpine:init', () => {
         orderViewTab: 'pending',
         filterCat: 'all',
         
-        // Modal Flags
+        // Modal State Toggles
         showAccountModal: false,
         showUserAdminModal: false,
         showNewItemModal: false,
         
-        // Forms Context Setup
+        // Form Binding Buffers
         loginForm: { username: '', password: '' },
         loginError: '',
         newUserForm: { username: '', password: '', role: 'readonly' },
@@ -34,11 +37,12 @@ document.addEventListener('alpine:init', () => {
         formOutward: { itemId: '', department: 'Kitchen', qty: '' },
         orderDesk: { supplierId: '', selectedItemId: '', selectedQty: '', basket: [] },
         
-        // Matrix Event Form Structures
+        // Catering Clipboard Paste Form Tracking Properties
         cateringForm: { partyName: '', paxCount: '', rawTextMenu: '' },
         cateringModal: { show: false, label: '', text: '' },
+        editingEventId: null,
         
-        // System Data Storage Repositories
+        // Data Collections States
         items: [],
         categories: [],
         suppliers: [],
@@ -47,19 +51,12 @@ document.addEventListener('alpine:init', () => {
         processedPurchaseOrders: [],
         events: [],
         departments: ['Kitchen', 'Bar', 'Banquet', 'Room Service'],
-        paletteOptions: [
-            { bg: '#eff6ff', text: '#1e40af', border: '#bfdbfe' },
-            { bg: '#fffbeb', text: '#92400e', border: '#fde68a' },
-            { bg: '#ecfdf5', text: '#065f46', border: '#a7f3d0' },
-            { bg: '#f3e8ff', text: '#6b21a8', border: '#e9d5ff' },
-            { bg: '#fce7f3', text: '#9d174d', border: '#fbcfe8' }
-        ],
         lastLogId: null,
         lastLogType: null,
 
-        // Core Init Lifecycle Hook Method
+        // Core App Lifecycle Entry point
         init() {
-            // Setup real-time listeners for data pipelines
+            // Bind real-time reactive event pipelines to Firebase Cloud Architecture
             onSnapshot(collection(dbFs, "items"), (snapshot) => {
                 this.items = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
             });
@@ -73,14 +70,14 @@ document.addEventListener('alpine:init', () => {
                 this.events = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
             });
 
-            // Auto-bypass auth logic for testing
+            // Standard Developer Auth Mode bypass configuration
             this.isAuthenticated = true; 
-            this.currentUsername = "Admin Studio Desk";
+            this.currentUsername = "Corporate Administrator";
             this.currentRole = "admin";
             this.ready = true;
         },
 
-        // --- MATRIX ENGINE CONTROLLER LAYER INTERFACES ---
+        // --- CATERING EVENT SYSTEM ARCHITECTURE ENGINE ---
         getEventsForDate(dateStr) {
             return this.events.filter(ev => ev.date === dateStr);
         },
@@ -95,9 +92,36 @@ document.addEventListener('alpine:init', () => {
             this.cateringModal.show = true;
         },
 
+        clearCateringForm() {
+            this.cateringForm.partyName = '';
+            this.cateringForm.paxCount = '';
+            this.cateringForm.rawTextMenu = '';
+            this.editingEventId = null;
+        },
+
+        editCateringEvent(eventObj) {
+            this.cateringForm.partyName = eventObj.partyName;
+            this.cateringForm.paxCount = eventObj.paxCount;
+            this.cateringForm.rawTextMenu = eventObj.menuText;
+            this.editingEventId = eventObj.id;
+            this.creationView = true;
+        },
+
+        async deleteCateringEvent(eventId) {
+            if (!confirm("Are you sure you want to completely delete this catering event and clear it from the cloud engine?")) return;
+            try {
+                await deleteDoc(doc(dbFs, "catering_events", eventId));
+                this.events = this.events.filter(e => e.id !== eventId);
+                alert("Function successfully deleted from firestore cloud records.");
+            } catch (err) {
+                console.error("Purge failure:", err);
+                alert("Operation failed. Verify Firebase connection status permissions.");
+            }
+        },
+
         async submitDirectTextCatering(dateString) {
             if (!this.cateringForm.partyName || !this.cateringForm.rawTextMenu) {
-                alert("Please declare event parameters and paste document menu data.");
+                alert("Please fill out the corporate client descriptive title and paste raw text menu data.");
                 return;
             }
 
@@ -106,65 +130,54 @@ document.addEventListener('alpine:init', () => {
                 partyName: this.cateringForm.partyName,
                 paxCount: Number(this.cateringForm.paxCount) || 0,
                 menuText: this.cateringForm.rawTextMenu,
-                created_at: Date.now()
+                updated_at: Date.now()
             };
 
             try {
-                const docRef = await addDoc(collection(dbFs, "catering_events"), payload);
-                payload.id = docRef.id;
-                this.events.push(payload);
-
-                // Reset forms fields values
-                this.cateringForm.partyName = '';
-                this.cateringForm.paxCount = '';
-                this.cateringForm.rawTextMenu = '';
-
-                alert("Staged portfolio written securely to target Firestore database instance.");
+                if (this.editingEventId) {
+                    // Update current record path execution
+                    await setDoc(doc(dbFs, "catering_events", this.editingEventId), payload, { merge: true });
+                    const idx = this.events.findIndex(e => e.id === this.editingEventId);
+                    if (idx !== -1) this.events[idx] = { id: this.editingEventId, ...payload };
+                    this.editingEventId = null;
+                    alert("Function record context updated successfully!");
+                } else {
+                    // Append fresh database document entry path execution
+                    payload.created_at = Date.now();
+                    const docRef = await addDoc(collection(dbFs, "catering_events"), payload);
+                    payload.id = docRef.id;
+                    this.events.push(payload);
+                    alert("Fresh function logged successfully!");
+                }
+                this.clearCateringForm();
             } catch (err) {
-                console.error("Mutation failed: ", err);
-                alert("Transaction dropped. Confirm Cloud Security rule access states.");
+                console.error("Mutation failure: ", err);
+                alert("Write request rejected. Check security policies configurations.");
             }
         },
 
-        // Auth Logic placeholders to keep standard script balance intact
+        // --- BACKEND FALLBACK PLACEHOLDERS STUBS ---
         verifyLogin() { 
             this.isAuthenticated = true; 
             this.currentUsername = this.loginForm.username || "Operator";
             this.currentRole = "admin";
         },
         logout() { this.isAuthenticated = false; },
-        
         get processedItems() {
             if (this.filterCat === 'all') return this.items;
             return this.items.filter(i => i.category_name === this.filterCat);
         },
         get filteredInwardItems() { return this.items; },
         get filteredOrderDeskItems() { return this.items; },
-        
-        // System Actions placeholding blocks
-        changeUserRole() {},
-        promptResetPassword() {},
-        deleteUser() {},
-        createUser() {},
-        submitNewCategory() {},
-        showNewItemModal() {},
-        submitNewItem() {},
-        changeMyPassword() {},
-        addInward() {},
-        deductOutward() {},
-        addItemToOrder() {},
+        addInward() {}, 
+        deductOutward() {}, 
+        addItemToOrder() {}, 
         removeOrderBasketItem() {},
-        sendWhatsAppOrder() {},
-        approveIncomingOrder() {},
+        sendWhatsAppOrder() {}, 
+        approveIncomingOrder() {}, 
         declineIncomingOrder() {},
-        downloadInwardSupplierReport() {},
-        downloadExcelReport() {},
-        shiftOrder() {},
-        changeItemName() {},
-        modifyThreshold() {},
-        purgeItem() {},
-        undoLastTransaction() {},
-        triggerUndo() {},
-        isWithin30Minutes() { return false; }
+        downloadInwardSupplierReport() {}, 
+        downloadExcelReport() {}, 
+        purgeItem() {}
     }));
 });
