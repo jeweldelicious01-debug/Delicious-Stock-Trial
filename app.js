@@ -1,164 +1,810 @@
 import { dbFs } from './firebase-config.js';
-import { 
-    collection, 
-    addDoc, 
-    doc, 
-    setDoc, 
-    deleteDoc, 
-    onSnapshot 
-} from "https://www.gstatic.com/firebasejs/10.13.2/firebase-firestore.js";
+import {
+    collection,
+    doc,
+    getDocs,
+    setDoc,
+    addDoc,
+    updateDoc,
+    deleteDoc,
+    onSnapshot,
+} from 'https://www.gstatic.com/firebasejs/10.13.2/firebase-firestore.js';
 
-document.addEventListener('alpine:init', () => {
-    Alpine.data('stockApp', () => ({
-        // App Core State Properties
+const SESSION_KEY = 'restaurantStockSession_v1';
+const colRef = (name) => collection(dbFs, name);
+
+async function sha256(text) {
+    const enc = new TextEncoder().encode(text);
+    const hashBuf = await crypto.subtle.digest('SHA-256', enc);
+    return Array.from(new Uint8Array(hashBuf)).map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+let swRegistration = null;
+if (typeof window !== 'undefined' && 'serviceWorker' in navigator && window.location.protocol.startsWith('http')) {
+    navigator.serviceWorker.register('./sw.js').then((reg) => {
+        swRegistration = reg;
+    }).catch((err) => console.warn('Service Worker registration skipped:', err));
+}
+
+async function sendBrowserNotification(title, body) {
+    if (typeof window === 'undefined' || !("Notification" in window)) return;
+    if (Notification.permission !== "granted") return;
+
+    try {
+        if (swRegistration && swRegistration.active) {
+            swRegistration.showNotification(title, {
+                body: body,
+                icon: "https://cdn-icons-png.flaticon.com/512/3081/3081840.png",
+                badge: "https://cdn-icons-png.flaticon.com/512/3081/3081840.png",
+                vibrate: [200, 100, 200]
+            });
+        } else {
+            new Notification(title, { body: body, icon: "https://cdn-icons-png.flaticon.com/512/3081/3081840.png" });
+        }
+    } catch (err) {
+        console.warn("Notification dispatch error:", err);
+    }
+}
+
+function isFuzzyMatch(itemName = "", searchQuery = "") {
+    if (!searchQuery || !searchQuery.trim()) return true;
+    const tokens = searchQuery
+        .toLowerCase()
+        .split(/\s+/)
+        .filter(t => t.length > 0 && !["of", "and", "the", "in", "with", "a", "an", "for"].includes(t));
+    if (tokens.length === 0) return true;
+    const target = itemName.toLowerCase();
+    return tokens.some(token => target.includes(token));
+}
+
+function normalizeUnit(unitStr = "") {
+    const u = String(unitStr || "").trim().toLowerCase();
+    if (/^(kg|kgs|kilo|kilograms?)$/i.test(u)) return 'kg';
+    if (/^(gm|gms|g|grams?)$/i.test(u)) return 'g';
+    if (/^(l|ltr|liters?|litres?)$/i.test(u)) return 'L';
+    if (/^(ml|milliliters?|millilitres?)$/i.test(u)) return 'ml';
+    if (/^(bottles?|bottels?|btls?)$/i.test(u)) return 'bottle';
+    if (/^(packets?|pkts?|pouch|pouches)$/i.test(u)) return 'pkt';
+    if (/^(tins?|cans?)$/i.test(u)) return 'tin';
+    if (/^(box|boxes)$/i.test(u)) return 'box';
+    if (/^(n|nos?|numbers?|pcs?|pieces?)$/i.test(u)) return 'N';
+    return u;
+}
+
+function getItemUnitProfile(itemName = "") {
+    const name = String(itemName || "");
+    const bracketMatch = name.match(/\(([^)]+)\)/);
+    const bracketContent = bracketMatch ? bracketMatch[1].trim() : null;
+
+    let targetUnit = null;
+    let bracketSize = null;
+
+    if (bracketContent) {
+        const numMatch = bracketContent.match(/(\d+(?:\.\d+)?)\s*([a-zA-Z]+)/);
+        if (numMatch) {
+            bracketSize = parseFloat(numMatch[1]);
+            targetUnit = normalizeUnit(numMatch[2]);
+        } else {
+            targetUnit = normalizeUnit(bracketContent);
+        }
+    }
+
+    const packMatch = name.match(/(\d+(?:\.\d+)?)\s*(kg|kgs|kilo|kilograms?|gm|gms|g|grams?|l|ltr|liters?|litres?|ml|pkts?|packets?|pcs?|pieces?|box|boxes|tins?|bottles?|bottels?|btls?|cans?|n)\b/i);
+    const packSize = packMatch ? parseFloat(packMatch[1]) : 1;
+    const packUnit = packMatch ? normalizeUnit(packMatch[2]) : "";
+
+    if (!targetUnit) {
+        if (/\b(bottles?|bottels?|btls?)\b/i.test(name)) targetUnit = 'bottle';
+        else if (/\b(packets?|pkts?|pouch|pouches)\b/i.test(name)) targetUnit = 'pkt';
+        else if (/\b(tins?|cans?)\b/i.test(name)) targetUnit = 'tin';
+        else if (/\b(box|boxes)\b/i.test(name)) targetUnit = 'box';
+        else if (/\d+\s*n\b/i.test(name) || /\b(nos?|numbers?|pcs?|pieces?|\bn\b)\b/i.test(name)) targetUnit = 'N';
+        else if (packUnit) targetUnit = packUnit;
+        else targetUnit = 'default';
+    }
+
+    return {
+        targetUnit,
+        hasBracket: !!bracketContent,
+        bracketSize,
+        packSize: (bracketSize || packSize || 1),
+        packUnit: (packUnit || targetUnit)
+    };
+}
+
+function parseQuantityInput(inputStr, itemName = "") {
+    if (typeof inputStr === 'number') inputStr = String(inputStr);
+    if (!inputStr || !String(inputStr).trim()) return NaN;
+
+    const str = String(inputStr).trim().toLowerCase();
+    const profile = getItemUnitProfile(itemName);
+    const target = profile.targetUnit;
+    const packSize = profile.packSize;
+    const isCountUnit = ['bottle', 'pkt', 'tin', 'box', 'N'].includes(target);
+
+    const compoundKgG = str.match(/^([\d.]+)\s*(?:kg|kgs|kilo|kilograms?)\s*([\d.]+)\s*(?:g|gm|gms|gram|grams)$/);
+    if (compoundKgG) {
+        const totalKg = (parseFloat(compoundKgG[1]) || 0) + ((parseFloat(compoundKgG[2]) || 0) / 1000);
+        if (target === 'kg') return Math.round(totalKg * 1000) / 1000;
+        if (target === 'g') return Math.round(totalKg * 1000);
+        if (isCountUnit && profile.packUnit === 'kg') return Math.round((totalKg / packSize) * 1000) / 1000;
+        if (isCountUnit && profile.packUnit === 'g') return Math.round(((totalKg * 1000) / packSize) * 1000) / 1000;
+    }
+
+    if (isCountUnit) {
+        if (/kg|kgs|kilo/i.test(str) && profile.packUnit === 'kg') {
+            const rawKg = parseFloat(str.replace(/[^0-9.]/g, ''));
+            if (!isNaN(rawKg)) return Math.round((rawKg / packSize) * 1000) / 1000;
+        }
+        if (/g|gm|gms|gram/i.test(str) && profile.packUnit === 'g') {
+            const rawG = parseFloat(str.replace(/[^0-9.]/g, ''));
+            if (!isNaN(rawG)) return Math.round((rawG / packSize) * 1000) / 1000;
+        }
+        if (/l|ltr|liter/i.test(str) && profile.packUnit === 'L') {
+            const rawL = parseFloat(str.replace(/[^0-9.]/g, ''));
+            if (!isNaN(rawL)) return Math.round((rawL / packSize) * 1000) / 1000;
+        }
+        if (/ml|milliliters?/i.test(str) && profile.packUnit === 'ml') {
+            const rawMl = parseFloat(str.replace(/[^0-9.]/g, ''));
+            if (!isNaN(rawMl)) return Math.round((rawMl / packSize) * 1000) / 1000;
+        }
+    } else if (target === 'kg') {
+        if (/g|gm|gms|gram/i.test(str)) {
+            const rawG = parseFloat(str.replace(/[^0-9.]/g, ''));
+            if (!isNaN(rawG)) return Math.round((rawG / 1000) * 1000) / 1000;
+        }
+        if (/bottles?|bottels?|pkts?|packets?|tins?|cans?|box/i.test(str)) {
+            const count = parseFloat(str.replace(/[^0-9.]/g, ''));
+            if (!isNaN(count)) return Math.round((count * packSize) * 1000) / 1000;
+        }
+    } else if (target === 'g') {
+        if (/kg|kgs|kilo/i.test(str)) {
+            const rawKg = parseFloat(str.replace(/[^0-9.]/g, ''));
+            if (!isNaN(rawKg)) return Math.round(rawKg * 1000);
+        }
+        if (/bottles?|bottels?|pkts?|packets?|tins?|cans?|box/i.test(str)) {
+            const count = parseFloat(str.replace(/[^0-9.]/g, ''));
+            if (!isNaN(count)) return Math.round(count * packSize);
+        }
+    } else if (target === 'L') {
+        if (/ml|milliliters?/i.test(str)) {
+            const rawMl = parseFloat(str.replace(/[^0-9.]/g, ''));
+            if (!isNaN(rawMl)) return Math.round((rawMl / 1000) * 1000) / 1000;
+        }
+        if (/bottles?|bottels?|pkts?|packets?|tins?|cans?|box/i.test(str)) {
+            const count = parseFloat(str.replace(/[^0-9.]/g, ''));
+            if (!isNaN(count)) return Math.round((count * packSize) * 1000) / 1000;
+        }
+    } else if (target === 'ml') {
+        if (/l|ltr|liter/i.test(str)) {
+            const rawL = parseFloat(str.replace(/[^0-9.]/g, ''));
+            if (!isNaN(rawL)) return Math.round(rawL * 1000);
+        }
+    }
+
+    const rawNum = parseFloat(str.replace(/[^0-9.]/g, ''));
+    if (isNaN(rawNum)) return NaN;
+    return Math.round(rawNum * 1000) / 1000;
+}
+
+function formatStockDisplay(stock, itemName = "") {
+    const val = Number(stock) || 0;
+    const profile = getItemUnitProfile(itemName);
+    const target = profile.targetUnit;
+
+    if (target === 'kg') {
+        const isNegative = val < 0;
+        const absVal = Math.abs(val);
+        let wholeKg = Math.floor(absVal);
+        let remGrams = Math.round((absVal - wholeKg) * 1000);
+        if (remGrams === 1000) { wholeKg += 1; remGrams = 0; }
+        if (wholeKg > 0 && remGrams > 0) return (isNegative ? "-" : "") + `${wholeKg} kg ${remGrams} g`;
+        if (wholeKg > 0) return (isNegative ? "-" : "") + `${wholeKg} kg`;
+        if (remGrams > 0) return (isNegative ? "-" : "") + `${remGrams} g`;
+        return `0 kg`;
+    }
+
+    if (target === 'g') {
+        if (val >= 1000) {
+            let wholeKg = Math.floor(val / 1000);
+            let remG = Math.round(val % 1000);
+            return remG > 0 ? `${wholeKg} kg ${remG} g` : `${wholeKg} kg`;
+        }
+        return `${val} g`;
+    }
+
+    if (target === 'L') {
+        const isNegative = val < 0;
+        const absVal = Math.abs(val);
+        let wholeL = Math.floor(absVal);
+        let remMl = Math.round((absVal - wholeL) * 1000);
+        if (remMl === 1000) { wholeL += 1; remMl = 0; }
+        if (wholeL > 0 && remMl > 0) return (isNegative ? "-" : "") + `${wholeL} L ${remMl} ml`;
+        if (wholeL > 0) return (isNegative ? "-" : "") + `${wholeL} L`;
+        if (remMl > 0) return (isNegative ? "-" : "") + `${remMl} ml`;
+        return `0 L`;
+    }
+
+    if (target === 'ml') {
+        if (val >= 1000) {
+            let wholeL = Math.floor(val / 1000);
+            let remMl = Math.round(val % 1000);
+            return remMl > 0 ? `${wholeL} L ${remMl} ml` : `${wholeL} L`;
+        }
+        return `${val} ml`;
+    }
+
+    if (['bottle', 'pkt', 'tin', 'box', 'N'].includes(target)) {
+        return `${val} ${target}`;
+    }
+
+    return `${val}`;
+}
+
+function formatShortQty(val, itemName = "") {
+    const num = Number(val) || 0;
+    const profile = getItemUnitProfile(itemName);
+    const target = profile.targetUnit;
+
+    if (target === 'kg') {
+        const isNegative = num < 0;
+        const absVal = Math.abs(num);
+        let wholeKg = Math.floor(absVal);
+        let remGrams = Math.round((absVal - wholeKg) * 1000);
+        if (remGrams === 1000) { wholeKg += 1; remGrams = 0; }
+        if (wholeKg > 0 && remGrams > 0) return `${isNegative ? '-' : ''}${wholeKg}kg ${remGrams}g`;
+        if (wholeKg > 0) return `${isNegative ? '-' : ''}${wholeKg}kg`;
+        if (remGrams > 0) return `${isNegative ? '-' : ''}${remGrams}g`;
+        return `0kg`;
+    }
+
+    if (target === 'g') {
+        if (num >= 1000) {
+            let wholeKg = Math.floor(num / 1000);
+            let remG = Math.round(num % 1000);
+            return remG > 0 ? `${wholeKg}kg ${remG}g` : `${wholeKg}kg`;
+        }
+        return `${num}g`;
+    }
+
+    if (target === 'L') {
+        const isNegative = num < 0;
+        const absVal = Math.abs(num);
+        let wholeL = Math.floor(absVal);
+        let remMl = Math.round((absVal - wholeL) * 1000);
+        if (remMl === 1000) { wholeL += 1; remMl = 0; }
+        if (wholeL > 0 && remMl > 0) return `${isNegative ? '-' : ''}${wholeL}L ${remMl}ml`;
+        if (wholeL > 0) return `${isNegative ? '-' : ''}${wholeL}L`;
+        if (remMl > 0) return `${isNegative ? '-' : ''}${remMl}ml`;
+        return `0L`;
+    }
+
+    if (target === 'ml') {
+        if (num >= 1000) {
+            let wholeL = Math.floor(num / 1000);
+            let remMl = Math.round(num % 1000);
+            return remMl > 0 ? `${wholeL}L ${remMl}ml` : `${wholeL}L`;
+        }
+        return `${num}ml`;
+    }
+
+    if (['bottle', 'pkt', 'tin', 'box', 'N'].includes(target)) {
+        return `${num} ${target}`;
+    }
+
+    return `${num}`;
+}
+
+function formatSheetDate(dateStr) {
+    if (!dateStr) return "Report";
+    const parts = dateStr.split('-');
+    if (parts.length !== 3) return dateStr;
+    const d = new Date(parseInt(parts[0], 10), parseInt(parts[1], 10) - 1, parseInt(parts[2], 10));
+    const day = d.getDate();
+    const month = d.toLocaleString('en-US', { month: 'short' });
+    return `${day}${month}`;
+}
+
+function extractLocalDateKey(dateVal) {
+    if (!dateVal) return null;
+    if (typeof dateVal === 'string') {
+        const match = dateVal.match(/^(\d{4}-\d{2}-\d{2})/);
+        if (match) return match[1];
+    }
+    const d = new Date(dateVal);
+    if (isNaN(d.getTime())) return null;
+    const year = d.getFullYear();
+    const month = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    return `${year}-${month}-${day}`;
+}
+
+async function seedIfEmpty() {
+    try {
+        const usersSnap = await getDocs(colRef('users'));
+        if (usersSnap.empty) {
+            const adminHash = await sha256('ChangeMe123!');
+            await setDoc(doc(dbFs, 'users', 'admin-seed'), { username: 'admin', passwordHash: adminHash, role: 'admin' });
+            await setDoc(doc(dbFs, 'users', 'order-seed'), { username: 'order', passwordHash: await sha256('Order123!'), role: 'order' });
+            await setDoc(doc(dbFs, 'users', 'inward-seed'), { username: 'inward', passwordHash: await sha256('Inward123!'), role: 'inward' });
+        }
+
+        const requiredCategories = [
+            { id: 'gujarati', name: 'ગુજરાતી', emoji: '🍆', bg_color: '#fef2f2', border_color: '#ef4444', text_color: '#991b1b' },
+            { id: 'restaurant', name: 'restaurant', emoji: '🍽️', bg_color: '#f8fafc', border_color: '#475569', text_color: '#1e293b' },
+            { id: 'ice_cream', name: 'ice cream', emoji: '🍨', bg_color: '#ecfeff', border_color: '#06b6d4', text_color: '#155e75' },
+            { id: 'kirana', name: 'Kirana', emoji: '🛒', bg_color: '#f8fafc', border_color: '#64748b', text_color: '#334151' },
+            { id: 'frozen', name: 'Frozen', emoji: '❄️', bg_color: '#ecfeff', border_color: '#06b6d4', text_color: '#083344' },
+            { id: 'masala', name: 'Masala', emoji: '🍛', bg_color: '#fff7ed', border_color: '#f97316', text_color: '#7c2d12' },
+            { id: 'grain', name: 'Grain', emoji: '🌾', bg_color: '#fefce8', border_color: '#eab308', text_color: '#713f12' },
+            { id: 'vegetables', name: 'Vegetables', emoji: '🥦', bg_color: '#f0fdf4', border_color: '#22c55e', text_color: '#14532d' },
+            { id: 'bottle', name: 'Bottle', emoji: '🍾', bg_color: '#f5f5f4', border_color: '#737367', text_color: '#1c1917' },
+            { id: 'pasta', name: 'Pasta', emoji: '🍝', bg_color: '#fffbeb', border_color: '#f59e0b', text_color: '#78350f' },
+            { id: 'dairy', name: 'Dairy', emoji: '🥛', bg_color: '#eff6ff', border_color: '#3b82f6', text_color: '#1e40af' },
+            { id: 'disposables', name: 'Disposables', emoji: '🥤', bg_color: '#fafafa', border_color: '#a3a3a3', text_color: '#171717' },
+            { id: 'flour', name: 'Flour', emoji: '🥡', bg_color: '#fdf6f0', border_color: '#cca47c', text_color: '#4a3319' },
+            { id: 'tin', name: 'Tin', emoji: '🥫', bg_color: '#f0fdfa', border_color: '#14b8a6', text_color: '#115e59' },
+            { id: 'khademasala', name: 'KhadeMasala', emoji: '🌶️', bg_color: '#fff1f2', border_color: '#f43f5e', text_color: '#4c0519' },
+            { id: 'beverages', name: 'Beverages', emoji: '🧃', bg_color: '#fdf2f8', border_color: '#ec4899', text_color: '#701a75' }
+        ];
+
+        const catSnap = await getDocs(colRef('categories'));
+        const existingCatIds = new Set(catSnap.docs.map(d => d.id));
+
+        for (const cat of requiredCategories) {
+            if (!existingCatIds.has(cat.id)) {
+                await setDoc(doc(dbFs, 'categories', cat.id), {
+                    name: cat.name,
+                    emoji: cat.emoji,
+                    bg_color: cat.bg_color,
+                    border_color: cat.border_color,
+                    text_color: cat.text_color
+                });
+            }
+        }
+
+        const supSnap = await getDocs(colRef('suppliers'));
+        if (supSnap.empty) {
+            await addDoc(colRef('suppliers'), { name: 'Laxmi Traders', phone: '919999999999' });
+            await addDoc(colRef('suppliers'), { name: 'Balaji Food Products', phone: '918888888888' });
+        }
+    } catch (e) {
+        console.warn("Seeding error: ", e);
+    }
+}
+
+export function stockApp() {
+    return {
+        categories: [],
+        items: [],
+        cateringEvents: [],
+        logs: [],
+        allRawLogs: [],
+        users: [],
+        suppliers: [],
+        purchaseOrders: [],
+        
+        ready: true,
         isAuthenticated: false,
         authChecking: false,
-        ready: false,
-        currentUsername: '',
         currentRole: 'readonly',
-        orderViewTab: 'pending',
+        currentUsername: '',
+        currentUserId: null,
         filterCat: 'all',
+        filterSupplier: 'all',
+        orderViewTab: 'pending',
         
-        // Modal State Toggles
-        showAccountModal: false,
-        showUserAdminModal: false,
-        showNewItemModal: false,
-        creationView: false,
-        
-        // Form Binding Buffers
         loginForm: { username: '', password: '' },
         loginError: '',
-        newUserForm: { username: '', password: '', role: 'readonly' },
-        newCategoryForm: { name: '', emoji: '', paletteIndex: 0 },
-        newItemForm: { name: '', categoryId: '', supplierName: '', threshold: 10, mrp: 0 },
-        accountForm: { currentPassword: '', newPassword: '' },
-        accountError: '',
-        accountSuccess: '',
-        formInward: { supplierName: '', itemId: '', qty: '' },
-        formOutward: { itemId: '', department: 'Kitchen', qty: '' },
-        orderDesk: { supplierId: '', selectedItemId: '', selectedQty: '', basket: [] },
         
-        // Catering Clipboard Paste Form Tracking Properties
+        inwardSearchQuery: '',
+        formInward: { itemId: '', qty: '', supplierName: '', customDate: '' },
+        
+        outwardSearchQuery: '',
+        formOutward: { itemId: '', department: 'restaurant', qty: '', customDate: '' },
+
+        orderDeskSearchQuery: '',
+        orderDesk: {
+            supplierId: '',
+            selectedItemId: '',
+            selectedQty: '',
+            basket: []
+        },
+
+        activeReconciliationOrder: null,
+        reconcileExtraItemId: '',
+        reconcileExtraQty: '',
+
         cateringForm: { partyName: '', paxCount: '', rawTextMenu: '' },
         cateringModal: { show: false, label: '', text: '' },
         editingEventId: null,
         
-        // Data Collections States
-        items: [],
-        categories: [],
-        suppliers: [],
-        users: [],
-        logs: [],
-        processedPurchaseOrders: [],
-        events: [],
-        departments: ['Kitchen', 'Bar', 'Banquet', 'Room Service'],
         lastLogId: null,
-        lastLogType: null,
+        lastLogType: '',
+        
+        showNewItemModal: false,
+        showEditItemModal: false,
+        editItemForm: { id: '', name: '', mrp: 0, supplierName: '', categoryId: '' },
 
-        // Core App Lifecycle Entry point
-        init() {
-            // Bind real-time reactive event pipelines to Firebase Cloud Architecture
-            onSnapshot(collection(dbFs, "items"), (snapshot) => {
-                this.items = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-            });
-            onSnapshot(collection(dbFs, "categories"), (snapshot) => {
-                this.categories = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-            });
-            onSnapshot(collection(dbFs, "suppliers"), (snapshot) => {
-                this.suppliers = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-            });
-            onSnapshot(collection(dbFs, "catering_events"), (snapshot) => {
-                this.events = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-            });
-            onSnapshot(collection(dbFs, "users"), (snapshot) => {
-                this.users = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-            });
+        showAccountModal: false,
+        showUserAdminModal: false,
+        
+        newItemForm: { name: '', categoryId: '', supplierName: '', threshold: 0, mrp: '' },
+        newCategoryForm: { name: '', emoji: '📦', paletteIndex: 0 },
+        paletteOptions: [
+            { bg: '#eff6ff', border: '#3b82f6', text: '#1e40af' },
+            { bg: '#fffbeb', border: '#f59e0b', text: '#92400e' },
+            { bg: '#f0fdf4', border: '#22c55e', text: '#166534' },
+            { bg: '#faf5ff', border: '#a855f7', text: '#6b21a8' },
+            { bg: '#fdf2f8', border: '#ec4899', text: '#9d174d' },
+            { bg: '#f8fafc', border: '#64748b', text: '#334151' }
+        ],
 
-            // Standard Developer Auth Mode bypass configuration
-            this.isAuthenticated = true; 
-            this.currentUsername = "Corporate Administrator";
-            this.currentRole = "admin";
-            this.ready = true;
+        accountForm: { currentPassword: '', newPassword: '' },
+        accountError: '',
+        accountSuccess: '',
+        newUserForm: { username: '', password: '', role: 'inward' },
+        newUserError: '',
+        departments: ['all', 'f&b', 'restaurant', 'Chinese', 'Indian', 'South Indian', 'Gujarati', 'Continental', 'Tandoor', 'Housekeeping'],
+
+        formatStock(stock, itemName = "") {
+            return formatStockDisplay(stock, itemName);
         },
 
-        // --- EXCEL BULK UPLOAD ENGINE (AUTO-RESOLVING PIPELINE) ---
-        async uploadExcelReport(event) {
-            if (this.currentRole !== 'admin' && this.currentRole !== 'inward') {
-                alert("Security Exception: Your operating role scope does not authorize bulk database ingest mutations.");
-                event.target.value = "";
+        selectItemForForms(item) {
+            if (!item) return;
+            const defaultSupplier = this.suppliers[0] ? this.suppliers[0].name : '';
+            this.formInward.supplierName = item.supplier_name || defaultSupplier;
+            this.inwardSearchQuery = item.name;
+            this.formInward.itemId = item.id;
+
+            this.outwardSearchQuery = item.name;
+            this.formOutward.itemId = item.id;
+        },
+
+        get filteredInwardItems() {
+            if (!this.formInward.supplierName) return [];
+            const defaultSupplier = this.suppliers[0] ? this.suppliers[0].name : '';
+            return this.items.filter(i => {
+                const itemSupplier = i.supplier_name || defaultSupplier;
+                const matchesSupplier = itemSupplier === this.formInward.supplierName;
+                const matchesQuery = isFuzzyMatch(i.name, this.inwardSearchQuery);
+                return matchesSupplier && matchesQuery;
+            });
+        },
+
+        get filteredOutwardItems() {
+            return this.items.filter(i => isFuzzyMatch(i.name, this.outwardSearchQuery));
+        },
+
+        get filteredOrderDeskItems() {
+            if (!this.orderDesk.supplierId) return [];
+            const vendor = this.suppliers.find(s => String(s.id) === String(this.orderDesk.supplierId));
+            if (!vendor) return [];
+            const defaultSupplier = this.suppliers[0] ? this.suppliers[0].name : '';
+            
+            const matched = this.items.filter(i => {
+                const itemSupplier = i.supplier_name || defaultSupplier;
+                const matchesSupplier = itemSupplier === vendor.name;
+                const matchesQuery = isFuzzyMatch(i.name, this.orderDeskSearchQuery);
+                return matchesSupplier && matchesQuery;
+            });
+
+            return matched.sort((a, b) => {
+                const aStock = Number(a.stock) || 0;
+                const bStock = Number(b.stock) || 0;
+                const aThresh = Number(a.threshold) || 0;
+                const bThresh = Number(b.threshold) || 0;
+
+                const aGroup = aStock === 0 ? 0 : (aStock <= aThresh ? 1 : 2);
+                const bGroup = bStock === 0 ? 0 : (bStock <= bThresh ? 1 : 2);
+
+                if (aGroup !== bGroup) {
+                    return aGroup - bGroup;
+                }
+                return a.name.localeCompare(b.name, undefined, { sensitivity: 'base' });
+            });
+        },
+
+        get reconcileVendorItems() {
+            if (!this.activeReconciliationOrder) return [];
+            const vendorName = this.activeReconciliationOrder.supplier_name;
+            const defaultSupplier = this.suppliers[0] ? this.suppliers[0].name : '';
+            return this.items.filter(i => (i.supplier_name || defaultSupplier) === vendorName);
+        },
+
+        downloadCurrentStockReport() {
+            if (!this.processedItems.length) return alert("No inventory items found to export.");
+
+            const headerRow = [
+                "Item Name",
+                "Category",
+                "Primary Supplier",
+                "Current Stock",
+                "Safety Limit",
+                "Unit Price",
+                "Total Valuation",
+                "Stock Status"
+            ];
+
+            const rows = [headerRow];
+            let grandTotalValuation = 0;
+
+            this.processedItems.forEach(item => {
+                const stockDisplay = formatShortQty(item.stock, item.name);
+                const limitDisplay = formatShortQty(item.threshold, item.name);
+                const mrp = Number(item.mrp) || 0;
+                const totalVal = Math.round((Number(item.stock) || 0) * mrp * 100) / 100;
+                grandTotalValuation += totalVal;
+
+                let status = "Healthy";
+                if (Number(item.stock) === 0) status = "Out of Stock";
+                else if (Number(item.stock) <= Number(item.threshold)) status = "Low Stock";
+
+                rows.push([
+                    item.name,
+                    item.category_name,
+                    item.supplier_name || 'General Vendor',
+                    stockDisplay,
+                    limitDisplay,
+                    mrp,
+                    totalVal,
+                    status
+                ]);
+            });
+
+            rows.push([]);
+            rows.push(["", "", "", "", "", "GRAND TOTAL:", grandTotalValuation, ""]);
+
+            const ws = XLSX.utils.aoa_to_sheet(rows);
+            ws['!cols'] = [
+                { wch: 28 },
+                { wch: 16 },
+                { wch: 22 },
+                { wch: 16 },
+                { wch: 14 },
+                { wch: 16 },
+                { wch: 20 },
+                { wch: 14 }
+            ];
+
+            const wb = XLSX.utils.book_new();
+            XLSX.utils.book_append_sheet(wb, ws, "Current Stock");
+            const dateStr = new Date().toISOString().slice(0, 10);
+            XLSX.writeFile(wb, `Current_Stock_Report_${dateStr}.xlsx`);
+        },
+
+        async init() {
+            this.restoreSession();
+
+            try {
+                await seedIfEmpty();
+            } catch (err) {
+                console.warn("Seeding error:", err);
+            }
+            
+            onSnapshot(colRef('categories'), (snap) => { this.categories = snap.docs.map((d) => ({ id: d.id, ...d.data() })); });
+            onSnapshot(colRef('items'), (snap) => { this.items = snap.docs.map((d) => ({ id: d.id, ...d.data() })); });
+            onSnapshot(colRef('suppliers'), (snap) => { this.suppliers = snap.docs.map((d) => ({ id: d.id, ...d.data() })).sort((a,b) => a.name.localeCompare(b.name)); });
+
+            onSnapshot(colRef('purchase_orders'), (snap) => {
+                this.purchaseOrders = snap.docs.map((d) => ({ id: d.id, ...d.data() }))
+                    .sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+            });
+            
+            let isInitialEventLoad = true;
+            onSnapshot(colRef('catering_events'), (snap) => {
+                const events = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+                if (!isInitialEventLoad) {
+                    snap.docChanges().forEach((change) => {
+                        if (change.type === "added") {
+                            const data = change.doc.data();
+                            sendBrowserNotification(
+                                "🎉 High-Pax Catering Event Scheduled!",
+                                `Party: ${data.partyName} | Attendance: ${data.paxCount} Pax | Date: ${data.date}`
+                            );
+                        }
+                    });
+                }
+                this.cateringEvents = events;
+                isInitialEventLoad = false;
+            });
+
+            onSnapshot(colRef('logs'), (snap) => {
+                this.allRawLogs = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+                const todayStr = extractLocalDateKey(new Date());
+                
+                this.logs = [...this.allRawLogs]
+                    .filter((l) => extractLocalDateKey(l.created_at) === todayStr)
+                    .sort((a, b) => new Date(b.created_at) - new Date(a.created_at))
+                    .slice(0, 50)
+                    .map((l) => {
+                        const matchedItem = this.items.find((i) => String(i.id) === String(l.item_id));
+                        return { 
+                            ...l, 
+                            item_name: matchedItem ? matchedItem.name : (l.item_name || 'Unknown')
+                        };
+                    });
+            });
+
+            onSnapshot(colRef('users'), (snap) => {
+                this.users = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+                if (this.currentUserId) {
+                    const me = this.users.find((u) => u.id === this.currentUserId);
+                    if (!me) this.logout();
+                    else { this.currentRole = me.role; this.currentUsername = me.username; }
+                }
+                this.restoreSession();
+            });
+
+            this.initDailyStockCheckSchedule();
+        },
+
+        initDailyStockCheckSchedule() {
+            let lastTrigger = "";
+            setInterval(() => {
+                const now = new Date();
+                const hours = now.getHours();
+                const minutes = now.getMinutes();
+                const todayStr = extractLocalDateKey(now);
+
+                if (hours === 11 && minutes === 0 && lastTrigger !== `${todayStr}_1100`) {
+                    lastTrigger = `${todayStr}_1100`;
+                    this.notifyLowStockItems("11:00 AM Low Stock Audit Alert");
+                }
+
+                if (hours === 22 && minutes === 30 && lastTrigger !== `${todayStr}_2230`) {
+                    lastTrigger = `${todayStr}_2230`;
+                    this.notifyLowStockItems("10:30 PM Nightly Stock Alert");
+                }
+            }, 30000);
+        },
+
+        async requestNotificationAccess() {
+            if (!("Notification" in window)) {
+                alert("This browser/device does not support Web Notifications.");
                 return;
             }
-
-            const file = event.target.files[0];
-            if (!file) return;
-
-            const reader = new FileReader();
-            reader.onload = async (e) => {
-                try {
-                    const data = new Uint8Array(e.target.result);
-                    const workbook = XLSX.read(data, { type: 'array' });
-                    const sheetName = workbook.SheetNames[0];
-                    const jsonRows = XLSX.utils.sheet_to_json(workbook.Sheets[sheetName]);
-
-                    if (jsonRows.length === 0) {
-                        alert("The uploaded sheet contains no data.");
-                        return;
-                    }
-
-                    let addedItemsCount = 0;
-
-                    for (let row of jsonRows) {
-                        const rawItemName = row["Item Name"]?.toString().trim();
-                        const rawBalance = Number(row["Live Balance"]) || 0;
-                        const rawLimit = Number(row["Safety Limit"]) || 0;
-                        const rawMrp = Number(row["Unit Price (MRP)"]?.toString().replace(/[^0-9.]/g, '')) || 0;
-                        const rawCategory = row["Category Axis"]?.toString().trim();
-                        const rawSupplier = row["Primary Supplier"]?.toString().trim();
-
-                        if (!rawItemName) continue;
-
-                        if (rawCategory && !this.categories.some(c => c.name.toLowerCase() === rawCategory.toLowerCase())) {
-                            const newCatRef = await addDoc(collection(dbFs, "categories"), {
-                                name: rawCategory,
-                                emoji: "📦",
-                                bg_color: "#f1f5f9",
-                                text_color: "#334155",
-                                border_color: "#cbd5e1"
-                            });
-                            this.categories.push({ id: newCatRef.id, name: rawCategory });
-                        }
-
-                        if (rawSupplier && !this.suppliers.some(s => s.name.toLowerCase() === rawSupplier.toLowerCase())) {
-                            await addDoc(collection(dbFs, "suppliers"), { name: rawSupplier });
-                        }
-
-                        const itemExists = this.items.some(i => i.name.toLowerCase() === rawItemName.toLowerCase());
-                        if (!itemExists) {
-                            await addDoc(collection(dbFs, "items"), {
-                                name: rawItemName,
-                                stock: rawBalance,
-                                threshold: rawLimit,
-                                mrp: rawMrp,
-                                category_name: rawCategory || "General",
-                                supplier_name: rawSupplier || "General Vendor"
-                            });
-                            addedItemsCount++;
-                        }
-                    }
-
-                    alert(`Ingestion loop completed! Added ${addedItemsCount} brand new products dynamically to your cloud dashboard.`);
-                    event.target.value = "";
-                } catch (err) {
-                    console.error("Ingestion crash: ", err);
-                    alert("Failed to parse sheet data matrix context cleanly.");
-                }
-            };
-            reader.readAsArrayBuffer(file);
+            const permission = await Notification.requestPermission();
+            if (permission === "granted") {
+                await sendBrowserNotification("Notifications Activated! 🔔", "You will receive real-time catering allocations and low stock alerts.");
+            } else {
+                alert("Permission was denied. Please allow notifications in site settings.");
+            }
         },
 
-        // --- CATERING EVENT SYSTEM ARCHITECTURE ENGINE ---
+        notifyLowStockItems(triggerTitle = "Low Stock Alert") {
+            const lowItems = this.items.filter(i => (Number(i.stock) || 0) <= (Number(i.threshold) || 0));
+            if (lowItems.length > 0) {
+                const itemSummary = lowItems.slice(0, 4).map(i => `${i.name}: ${this.formatStock(i.stock, i.name)}`).join(', ');
+                const extra = lowItems.length > 4 ? ` and ${lowItems.length - 4} more` : '';
+                sendBrowserNotification(`⚠️ ${triggerTitle}`, `${lowItems.length} items reached safety limit: ${itemSummary}${extra}`);
+            }
+        },
+
+        restoreSession() {
+            try {
+                const session = JSON.parse(sessionStorage.getItem(SESSION_KEY) || 'null');
+                if (session && session.userId) {
+                    this.currentUserId = session.userId;
+                    this.isAuthenticated = true;
+                    if (this.users && this.users.length) {
+                        const user = this.users.find((u) => u.id === session.userId);
+                        if (user) {
+                            this.currentUsername = user.username;
+                            this.currentRole = user.role;
+                        }
+                    }
+                }
+            } catch (e) {
+                console.warn(e);
+            }
+        },
+
+        async verifyLogin() {
+            this.loginError = '';
+            const { username, password } = this.loginForm;
+            if (!username || !password) { this.loginError = 'Fields required'; return; }
+            const user = this.users.find((u) => u.username.toLowerCase() === username.trim().toLowerCase());
+            if (!user || (await sha256(password)) !== user.passwordHash) { this.loginError = 'Invalid credentials'; return; }
+            this.currentUserId = user.id; this.currentUsername = user.username; this.currentRole = user.role; this.isAuthenticated = true;
+            this.loginForm.password = '';
+            sessionStorage.setItem(SESSION_KEY, JSON.stringify({ userId: user.id }));
+        },
+
+        logout() { 
+            sessionStorage.removeItem(SESSION_KEY); 
+            this.isAuthenticated = false; 
+            this.currentRole = 'readonly'; 
+            this.currentUsername = ''; 
+            this.currentUserId = null; 
+            window.location.reload();
+        },
+
+        get processedItems() {
+            const now = Date.now();
+            const oneDayMs = 24 * 60 * 60 * 1000;
+
+            const recentInwardMap = new Map();
+            if (this.allRawLogs && this.allRawLogs.length) {
+                this.allRawLogs.forEach(log => {
+                    if (log.type === 'INWARD' && log.created_at) {
+                        const time = new Date(log.created_at).getTime();
+                        if (now - time <= oneDayMs) {
+                            const prev = recentInwardMap.get(String(log.item_id)) || 0;
+                            if (time > prev) recentInwardMap.set(String(log.item_id), time);
+                        }
+                    }
+                });
+            }
+
+            let dataset = this.items.map((i) => {
+                const cat = this.categories.find((c) => c.id === i.category_id) || {};
+                const stockVal = Number(i.stock) || 0;
+                const threshVal = Number(i.threshold) || 0;
+                const isRecentlyInwarded = recentInwardMap.has(String(i.id));
+
+                let statusGroup = 2; // 0: OUT, 1: LOW, 2: HEALTHY, 3: HEALTHY & INWARDED RECENTLY
+                if (stockVal === 0) {
+                    statusGroup = 0;
+                } else if (stockVal <= threshVal) {
+                    statusGroup = 1;
+                } else if (isRecentlyInwarded) {
+                    statusGroup = 3;
+                } else {
+                    statusGroup = 2;
+                }
+
+                return { 
+                    ...i, 
+                    category_name: cat.name || 'Unassigned', 
+                    emoji: cat.emoji || '📦', 
+                    bg: cat.bg_color || '#f3f4f6', 
+                    border: cat.border_color || '#9ca3af', 
+                    text_color: cat.text_color || '#374151',
+                    statusGroup
+                };
+            });
+
+            if (this.filterCat !== 'all') {
+                dataset = dataset.filter((i) => i.category_name === this.filterCat);
+            }
+
+            if (this.filterSupplier !== 'all') {
+                const defaultSupplier = this.suppliers[0] ? this.suppliers[0].name : '';
+                dataset = dataset.filter((i) => (i.supplier_name || defaultSupplier) === this.filterSupplier);
+            }
+
+            return dataset.sort((a, b) => {
+                if (a.statusGroup !== b.statusGroup) {
+                    return a.statusGroup - b.statusGroup;
+                }
+                return a.name.localeCompare(b.name, undefined, { sensitivity: 'base' });
+            });
+        },
+
+        get processedPurchaseOrders() {
+            const currentStatusTab = String(this.orderViewTab).toLowerCase();
+            return this.purchaseOrders.filter(o => {
+                const orderStatus = String(o.status).toLowerCase();
+                const matchesTab = (currentStatusTab === 'pending') 
+                    ? orderStatus === 'pending' 
+                    : orderStatus !== 'pending';
+
+                if (!matchesTab) return false;
+
+                if (this.currentRole === 'inward') {
+                    const creator = this.users.find(u => u.username === o.created_by);
+                    return creator && creator.role === 'order';
+                }
+
+                return true;
+            });
+        },
+
         getEventsForDate(dateStr) {
-            return this.events.filter(ev => ev.date === dateStr);
+            if (!dateStr || !this.cateringEvents) return [];
+            return this.cateringEvents.filter(ev => String(ev.date) === String(dateStr));
         },
 
         getEventCountForDate(dateStr) {
@@ -183,51 +829,28 @@ document.addEventListener('alpine:init', () => {
             this.cateringForm.paxCount = eventObj.paxCount;
             this.cateringForm.rawTextMenu = eventObj.menuText;
             this.editingEventId = eventObj.id;
-            this.creationView = true;
         },
 
         async deleteCateringEvent(eventId) {
-            if (!confirm("Are you sure you want to completely delete this catering event and clear it from the cloud engine?")) return;
+            if (!confirm("Are you sure you want to delete this event?")) return;
             try {
                 await deleteDoc(doc(dbFs, "catering_events", eventId));
-                this.events = this.events.filter(e => e.id !== eventId);
-                alert("Function successfully deleted from firestore cloud records.");
+                this.cateringEvents = this.cateringEvents.filter(e => e.id !== eventId);
+                alert("Event deleted successfully.");
             } catch (err) {
-                console.error("Purge failure:", err);
-                alert("Operation failed. Verify Firebase connection status permissions.");
+                alert("Operation failed: " + err.message);
             }
-        },
-        
-        async changeUserRole(userId, newRole) {
-            try {
-                await setDoc(doc(dbFs, "users", userId), { role: newRole }, { merge: true });
-                const idx = this.users.findIndex(u => u.id === userId);
-                if (idx !== -1) this.users[idx].role = newRole;
-                alert(`Operator privileges successfully shifted to: ${newRole}`);
-            } catch (err) {
-                console.error("Failed to mutate user configuration:", err);
-            }
-        },
-
-        async changeMyPassword() {
-            if (!this.accountForm.currentPassword || !this.accountForm.newPassword) {
-                this.accountError = "All password metrics are required.";
-                return;
-            }
-            this.accountError = "";
-            this.accountSuccess = "Password modified successfully!";
-            setTimeout(() => { this.showAccountModal = false; this.accountSuccess = ""; }, 1500);
         },
 
         async submitDirectTextCatering(dateString) {
             if (!this.cateringForm.partyName || !this.cateringForm.rawTextMenu) {
-                alert("Please fill out the corporate client descriptive title and paste raw text menu data.");
+                alert("Please fill out the party title and paste menu text.");
                 return;
             }
 
             const payload = {
                 date: dateString,
-                partyName: this.cateringForm.partyName,
+                partyName: this.cateringForm.partyName.trim(),
                 paxCount: Number(this.cateringForm.paxCount) || 0,
                 menuText: this.cateringForm.rawTextMenu,
                 updated_at: Date.now()
@@ -236,73 +859,618 @@ document.addEventListener('alpine:init', () => {
             try {
                 if (this.editingEventId) {
                     await setDoc(doc(dbFs, "catering_events", this.editingEventId), payload, { merge: true });
-                    const idx = this.events.findIndex(e => e.id === this.editingEventId);
-                    if (idx !== -1) this.events[idx] = { id: this.editingEventId, ...payload };
+                    const idx = this.cateringEvents.findIndex(e => e.id === this.editingEventId);
+                    if (idx !== -1) this.cateringEvents[idx] = { id: this.editingEventId, ...payload };
                     this.editingEventId = null;
-                    alert("Function record context updated successfully!");
+                    alert("Function updated successfully!");
                 } else {
                     payload.created_at = Date.now();
-                    const docRef = await addDoc(collection(dbFs, "catering_events"), payload);
+                    const docRef = await addDoc(colRef('catering_events'), payload);
                     payload.id = docRef.id;
-                    this.events.push(payload);
+                    this.cateringEvents = [...this.cateringEvents, payload];
                     alert("Fresh function logged successfully!");
                 }
                 this.clearCateringForm();
             } catch (err) {
-                console.error("Mutation failure: ", err);
+                alert("Save failure: " + err.message);
             }
         },
 
-        downloadExcelReport() {
-            if (this.items.length === 0) return alert("No stock datasets found.");
-            const formatted = this.items.map(i => ({
-                "Item Name": i.name || "N/A",
-                "Live Balance": i.stock || 0,
-                "Safety Limit": i.threshold || 0,
-                "Unit Price (MRP)": i.mrp || 0,
-                "Category Axis": i.category_name || "General",
-                "Primary Supplier": i.supplier_name || "General Vendor"
-            }));
-            const ws = XLSX.utils.json_to_sheet(formatted);
-            const wb = XLSX.utils.book_new();
-            XLSX.utils.book_append_sheet(wb, ws, "Inventory Ledgers");
-            XLSX.writeFile(wb, "JewelD_Master_Inventory.xlsx");
+        async submitNewCategory() {
+            if (!this.newCategoryForm.name || !this.newCategoryForm.name.trim()) {
+                return alert("Category name is required.");
+            }
+
+            const name = this.newCategoryForm.name.trim();
+            const emoji = this.newCategoryForm.emoji.trim() || '📦';
+            const palette = this.paletteOptions[this.newCategoryForm.paletteIndex] || this.paletteOptions[0];
+            const catId = name.toLowerCase().replace(/[^a-z0-9]/g, '_') || `cat_${Date.now()}`;
+
+            try {
+                await setDoc(doc(dbFs, 'categories', catId), {
+                    name,
+                    emoji,
+                    bg_color: palette.bg,
+                    border_color: palette.border,
+                    text_color: palette.text
+                });
+                this.newCategoryForm = { name: '', emoji: '📦', paletteIndex: 0 };
+                alert(`Category "${name}" deployed successfully!`);
+            } catch (e) {
+                alert("Failed to create category: " + e.message);
+            }
+        },
+
+        addItemToOrder() {
+            if (!this.orderDesk.selectedItemId || !this.orderDesk.selectedQty || this.orderDesk.selectedQty <= 0) {
+                alert("Select product and enter valid quantity.");
+                return;
+            }
+            const itemObj = this.items.find(i => i.id === this.orderDesk.selectedItemId);
+            if (!itemObj) return;
+
+            this.orderDesk.basket.push({
+                id: itemObj.id,
+                name: itemObj.name,
+                qty: Number(this.orderDesk.selectedQty)
+            });
+            this.orderDesk.selectedItemId = '';
+            this.orderDesk.selectedQty = '';
+            this.orderDeskSearchQuery = '';
+        },
+
+        removeOrderBasketItem(index) {
+            this.orderDesk.basket.splice(index, 1);
+        },
+
+        async sendWhatsAppOrder() {
+            if (!this.orderDesk.supplierId || this.orderDesk.basket.length === 0) {
+                alert("Select supplier and add items to purchase basket.");
+                return;
+            }
+            const supplierObj = this.suppliers.find(s => s.id === this.orderDesk.supplierId);
+            const supplierName = supplierObj ? supplierObj.name : "Supplier";
+            const tomorrow = new Date();
+            tomorrow.setDate(tomorrow.getDate() + 1);
+
+            let messageLines = [
+                `*PURCHASE ORDER: ${supplierName.toUpperCase()}*`,
+                `*Date:* ${tomorrow.toLocaleDateString('en-GB')}`,
+                `--------------------------------`
+            ];
+
+            this.orderDesk.basket.forEach((item, index) => {
+                messageLines.push(`${index + 1}. *${item.name} - Qty: ${formatShortQty(item.qty, item.name)}*`);
+            });
+
+            window.open(`https://wa.me/?text=${encodeURIComponent(messageLines.join('\n'))}`, '_blank');
+
+            try {
+                const orderPayload = {
+                    supplier_id: supplierObj ? supplierObj.id : '',
+                    supplier_name: supplierName,
+                    items: JSON.parse(JSON.stringify(this.orderDesk.basket)),
+                    status: 'PENDING',
+                    created_at: new Date().toISOString(),
+                    created_by: this.currentUsername
+                };
+                const docRef = await addDoc(colRef('purchase_orders'), orderPayload);
+                orderPayload.id = docRef.id;
+                this.orderDesk.basket = [];
+                alert("Purchase order dispatched and registered for Inward validation.");
+            } catch (err) {
+                console.error("Order dispatch logging error:", err);
+            }
+        },
+
+        openReconciliationModal(order) {
+            this.activeReconciliationOrder = JSON.parse(JSON.stringify(order));
+            this.reconcileExtraItemId = '';
+            this.reconcileExtraQty = '';
+        },
+
+        removeReconciliationItem(index) {
+            if (!this.activeReconciliationOrder) return;
+            this.activeReconciliationOrder.items.splice(index, 1);
+        },
+
+        addReconcileExtraItem() {
+            if (!this.activeReconciliationOrder) return;
+            if (!this.reconcileExtraItemId || !this.reconcileExtraQty) {
+                return alert("Select product and specify quantity.");
+            }
+            const target = this.items.find(i => String(i.id) === String(this.reconcileExtraItemId));
+            if (!target) return;
+
+            this.activeReconciliationOrder.items.push({
+                id: target.id,
+                name: target.name,
+                qty: this.reconcileExtraQty
+            });
+
+            this.reconcileExtraItemId = '';
+            this.reconcileExtraQty = '';
+        },
+
+        async commitReconciliation() {
+            if (!this.activeReconciliationOrder) return;
+            const order = this.activeReconciliationOrder;
+
+            try {
+                for (let record of order.items) {
+                    const targetItem = this.items.find(i => String(i.id) === String(record.id));
+                    if (targetItem) {
+                        const arrivedQty = parseQuantityInput(record.qty, targetItem.name) || 0;
+                        if (arrivedQty > 0) {
+                            const newStock = Math.round((Number(targetItem.stock || 0) + arrivedQty) * 1000) / 1000;
+                            await updateDoc(doc(dbFs, 'items', targetItem.id), { stock: newStock });
+                            await addDoc(colRef('logs'), {
+                                type: 'INWARD',
+                                item_id: targetItem.id,
+                                item_name: targetItem.name,
+                                unit_price: parseFloat(targetItem.mrp) || 0,
+                                qty: arrivedQty,
+                                supplier_name: order.supplier_name,
+                                department: null,
+                                created_at: new Date().toISOString(),
+                                created_by_name: this.currentUsername
+                            });
+                        }
+                    }
+                }
+
+                await updateDoc(doc(dbFs, 'purchase_orders', order.id), {
+                    status: 'RECEIVED',
+                    items: order.items,
+                    resolved_at: new Date().toISOString(),
+                    resolved_by: this.currentUsername
+                });
+
+                this.activeReconciliationOrder = null;
+                alert("Inward reconciliation completed! Items verified and ingested into inventory.");
+            } catch (err) {
+                alert("Reconciliation failed: " + err.message);
+            }
+        },
+
+        async approveIncomingOrder(order) {
+            this.openReconciliationModal(order);
+        },
+
+        async declineIncomingOrder(order) {
+            if (order.status !== 'PENDING') return;
+            if (!confirm(`Cancel order from ${order.supplier_name}?`)) return;
+            try {
+                await updateDoc(doc(dbFs, 'purchase_orders', order.id), { status: 'DECLINED', resolved_at: new Date().toISOString(), resolved_by: this.currentUsername });
+                alert("Order canceled.");
+            } catch (error) { alert("Error: " + error.message); }
+        },
+
+        isWithin30Minutes(createdAt) {
+            if (!createdAt) return false;
+            return (new Date() - new Date(createdAt)) < 1800000;
+        },
+
+        async triggerUndo(log) {
+            if (!this.isWithin30Minutes(log.created_at)) return alert("Reversal window (30 min) expired.");
+            if (!confirm("Revert this entry?")) return;
+            try {
+                const targetItem = this.items.find(i => String(i.id) === String(log.item_id));
+                if (!targetItem) return alert("Item no longer exists.");
+                let currentBal = Number(targetItem.stock || 0);
+                let logQty = parseFloat(log.qty) || 0;
+                let corrected = log.type === 'INWARD' ? currentBal - logQty : currentBal + logQty;
+                corrected = Math.round(corrected * 1000) / 1000;
+                if (corrected < 0) return alert("Stock cannot drop below zero.");
+                await updateDoc(doc(dbFs, 'items', targetItem.id), { stock: corrected });
+                await deleteDoc(doc(dbFs, 'logs', log.id));
+                alert("Transaction rolled back successfully!");
+            } catch(e) { alert("Error: " + e.message); }
+        },
+
+        async addInward() {
+            if (!this.formInward.itemId || !this.formInward.qty || !this.formInward.supplierName) return alert('Select missing fields.');
+            const target = this.items.find((i) => String(i.id) === String(this.formInward.itemId));
+            if (!target) return alert('Selected item not found.');
+            
+            const qty = parseQuantityInput(this.formInward.qty, target.name); 
+            if (isNaN(qty) || qty <= 0) return alert('Enter a valid quantity.');
+            
+            let vendor = this.formInward.supplierName.trim();
+            if (vendor === "_NEW_") {
+                let newVendorName = prompt("Enter new Supplier Name:");
+                if (!newVendorName || !newVendorName.trim()) return alert("Supplier name required.");
+                vendor = newVendorName.trim();
+                const matchEx = this.suppliers.find(s => s.name.toLowerCase() === vendor.toLowerCase());
+                if (!matchEx) await addDoc(colRef('suppliers'), { name: vendor, phone: '' });
+            }
+
+            let entryTimestamp = new Date().toISOString();
+            if (this.currentRole === 'admin' && this.formInward.customDate) {
+                entryTimestamp = new Date(this.formInward.customDate).toISOString();
+            }
+
+            try {
+                const newStock = Math.round((Number(target.stock || 0) + qty) * 1000) / 1000;
+                await updateDoc(doc(dbFs, 'items', target.id), { stock: newStock });
+                const docRef = await addDoc(colRef('logs'), {
+                    type: 'INWARD',
+                    item_id: target.id,
+                    item_name: target.name,
+                    unit_price: parseFloat(target.mrp) || 0,
+                    qty, 
+                    supplier_name: vendor,
+                    department: null,
+                    created_at: entryTimestamp,
+                    created_by_name: this.currentUsername
+                });
+                
+                this.lastLogId = docRef.id;
+                this.lastLogType = 'INWARD';
+                this.formInward = { itemId: '', qty: '', supplierName: '', customDate: '' };
+                this.inwardSearchQuery = '';
+                alert(`Inward recorded: +${formatShortQty(qty, target.name)} for "${target.name}".`);
+            } catch (error) { 
+                alert("Write error: " + error.message);
+            }
+        },
+
+        async deductOutward() {
+            if (!this.formOutward.itemId || !this.formOutward.qty) return alert('Select missing fields.');
+            const target = this.items.find((i) => String(i.id) === String(this.formOutward.itemId));
+            if (!target) return alert('Item not found.');
+            
+            const qty = parseQuantityInput(this.formOutward.qty, target.name); 
+            if (isNaN(qty) || qty <= 0) return alert('Enter a valid quantity.');
+            if (Number(target.stock || 0) < qty) return alert(`Insufficient stock. Current balance is ${this.formatStock(target.stock, target.name)}.`);
+
+            let entryTimestamp = new Date().toISOString();
+            if (this.currentRole === 'admin' && this.formOutward.customDate) {
+                entryTimestamp = new Date(this.formOutward.customDate).toISOString();
+            }
+
+            try {
+                const newStock = Math.round((Number(target.stock) - qty) * 1000) / 1000;
+                const docRef = await addDoc(colRef('logs'), {
+                    type: 'OUTWARD',
+                    item_id: target.id,
+                    item_name: target.name,
+                    unit_price: parseFloat(target.mrp) || 0,
+                    qty, 
+                    department: this.formOutward.department,
+                    created_at: entryTimestamp,
+                    created_by_name: this.currentUsername
+                });
+                
+                await updateDoc(doc(dbFs, 'items', target.id), { stock: newStock });
+                this.lastLogId = docRef.id;
+                this.lastLogType = 'OUTWARD';
+                this.formOutward = { itemId: '', department: 'restaurant', qty: '', customDate: '' };
+                this.outwardSearchQuery = '';
+                alert(`Outward deduction logged: -${formatShortQty(qty, target.name)} for "${target.name}".`);
+            } catch (error) { 
+                alert("Error: " + error.message);
+            }
+        },
+
+        async promptAddNewSupplier() {
+            const name = prompt("Enter New Supplier/Vendor Name:");
+            if (!name || !name.trim()) return;
+
+            const trimmedName = name.trim();
+            const exists = this.suppliers.some(s => s.name.toLowerCase() === trimmedName.toLowerCase());
+            if (exists) return alert("Supplier already exists.");
+
+            const phone = prompt("Enter Supplier WhatsApp / Phone Number (optional, with country code e.g. 919876543210):") || "";
+
+            try {
+                await addDoc(colRef('suppliers'), { name: trimmedName, phone: phone.trim() });
+                alert(`Supplier "${trimmedName}" registered successfully!`);
+            } catch (e) {
+                alert("Failed to add supplier: " + e.message);
+            }
+        },
+
+        async quickAdjustStock(item) {
+            if (this.currentRole !== 'admin' && this.currentRole !== 'inward') return;
+            const currentFormatted = formatShortQty(item.stock, item.name);
+            const promptVal = prompt(`Update Total Net Stock for "${item.name}":\nCurrent Balance: ${currentFormatted}\n(Type exact count / net quantity):`, currentFormatted);
+            if (promptVal === null) return;
+            
+            const parsedStock = parseQuantityInput(promptVal, item.name);
+            if (isNaN(parsedStock) || parsedStock < 0) return alert("Enter a valid numerical stock quantity.");
+
+            try {
+                await updateDoc(doc(dbFs, 'items', item.id), { stock: parsedStock });
+                alert(`Stock for "${item.name}" updated to ${formatShortQty(parsedStock, item.name)}!`);
+            } catch (e) {
+                alert("Update failed: " + e.message);
+            }
+        },
+
+        async undoLastTransaction() {
+            if (!this.lastLogId) return alert("No recent log found.");
+            if (!confirm(`Revert your last ${this.lastLogType} entry?`)) return;
+            try {
+                const logsSnap = await getDocs(colRef('logs'));
+                const targetingLog = logsSnap.docs.find(d => d.id === this.lastLogId);
+                if (!targetingLog) { this.lastLogId = null; return; }
+                const logData = targetingLog.data();
+                if (!this.isWithin30Minutes(logData.created_at)) return alert("Reversal window expired.");
+                const targetItem = this.items.find(i => String(i.id) === String(logData.item_id));
+                if (!targetItem) return;
+                let logQty = parseFloat(logData.qty) || 0;
+                let balanceCorrection = logData.type === 'INWARD' ? Number(targetItem.stock || 0) - logQty : Number(targetItem.stock || 0) + logQty;
+                balanceCorrection = Math.round(balanceCorrection * 1000) / 1000;
+                if (balanceCorrection < 0) return alert("Rollback denied.");
+                await updateDoc(doc(dbFs, 'items', targetItem.id), { stock: balanceCorrection });
+                await deleteDoc(doc(dbFs, 'logs', this.lastLogId));
+                alert(`Rolled back successfully.`);
+                this.lastLogId = null; this.lastLogType = '';
+            } catch (e) { alert(e.message); }
+        },
+
+        async changeUserRole(userId, role) { await updateDoc(doc(dbFs, 'users', userId), { role }); },
+        async deleteUser(userId) { if (confirm('Delete user?')) await deleteDoc(doc(dbFs, 'users', userId)); },
+        
+        async changeMyPassword() {
+            if (this.currentRole !== 'admin') return alert("Only Administrators can modify profiles.");
+            this.accountError = ''; this.accountSuccess = '';
+            const { currentPassword, newPassword } = this.accountForm;
+            if (newPassword.length < 6) { this.accountError = 'Min 6 characters'; return; }
+            const user = this.users.find((u) => u.id === this.currentUserId);
+            if ((await sha256(currentPassword)) !== user.passwordHash) { this.accountError = 'Incorrect password'; return; }
+            await updateDoc(doc(dbFs, 'users', user.id), { passwordHash: await sha256(newPassword) });
+            this.accountSuccess = 'Password updated.';
+            this.accountForm = { currentPassword: '', newPassword: '' };
+        },
+
+        async createUser() {
+            const { username, password, role = 'inward' } = this.newUserForm;
+            if (!username || password.length < 6) return alert("Username required and password must be 6+ chars.");
+            try {
+                const passwordHash = await sha256(password);
+                await addDoc(colRef('users'), { username: username.trim(), passwordHash, role });
+                this.newUserForm = { username: '', password: '', role: 'inward' };
+                alert("Operator created.");
+            } catch (e) { alert(e.message); }
+        },
+        
+        async promptResetPassword(user) {
+            if (this.currentRole !== 'admin') return alert("Denied.");
+            let newPass = prompt(`Enter new password for ${user.username} (Min 6 chars):`);
+            if (!newPass || newPass.trim().length < 6) return alert("Minimum 6 characters needed.");
+            try {
+                await updateDoc(doc(dbFs, 'users', user.id), { passwordHash: await sha256(newPass.trim()) });
+                alert("Password updated!");
+            } catch (error) { alert(error.message); }
+        },
+
+        changeItemName(item) {
+            this.editItemForm = {
+                id: item.id,
+                name: item.name,
+                mrp: Number(item.mrp || 0),
+                supplierName: item.supplier_name || (this.suppliers[0] ? this.suppliers[0].name : ''),
+                categoryId: item.category_id || (this.categories[0] ? this.categories[0].id : '')
+            };
+            this.showEditItemModal = true;
+        },
+
+        async saveEditedItem() {
+            if (!this.editItemForm.id || !this.editItemForm.name.trim()) {
+                return alert("Item name is required.");
+            }
+
+            try {
+                await updateDoc(doc(dbFs, 'items', this.editItemForm.id), {
+                    name: this.editItemForm.name.trim(),
+                    mrp: Number(this.editItemForm.mrp) || 0,
+                    supplier_name: this.editItemForm.supplierName || 'General',
+                    category_id: this.editItemForm.categoryId
+                });
+                this.showEditItemModal = false;
+                alert(`Saved changes for "${this.editItemForm.name.trim()}".`);
+            } catch (e) {
+                alert("Update failed: " + e.message);
+            }
+        },
+
+        async modifyThreshold(item) {
+            let promptVal = prompt('Update safety limit:', formatShortQty(item.threshold, item.name));
+            if (promptVal !== null) {
+                const parsed = parseQuantityInput(promptVal, item.name);
+                if (!isNaN(parsed)) await updateDoc(doc(dbFs, 'items', item.id), { threshold: parsed });
+            }
+        },
+
+        async purgeItem(id) { if (confirm('Purge item entry?')) await deleteDoc(doc(dbFs, 'items', id)); },
+
+        async shiftOrder(id, direction) {
+            const sorted = [...this.items].sort((a, b) => (a.order_index || 0) - (b.order_index || 0));
+            const idx = sorted.findIndex((i) => i.id === id); if (idx === -1) return;
+            const swapIdx = idx + (direction === 'up' ? -1 : 1); if (swapIdx < 0 || swapIdx >= sorted.length) return;
+            await updateDoc(doc(dbFs, 'items', sorted[idx].id), { order_index: sorted[swapIdx].order_index || 0 });
+            await updateDoc(doc(dbFs, 'items', sorted[swapIdx].id), { order_index: sorted[swapIdx].order_index || 0 });
+        },
+
+        async submitNewItem() {
+            if (!this.newItemForm.name.trim() || !this.newItemForm.categoryId || !this.newItemForm.supplierName) return alert("Please map all fields.");
+            const maxOrder = this.items.reduce((m, i) => Math.max(m, i.order_index || 0), 0);
+            const parsedThreshold = parseQuantityInput(this.newItemForm.threshold, this.newItemForm.name) || 0;
+            await addDoc(colRef('items'), { name: this.newItemForm.name.trim(), category_id: this.newItemForm.categoryId, supplier_name: this.newItemForm.supplierName, stock: 0, threshold: parsedThreshold, mrp: Number(this.newItemForm.mrp || 0), order_index: maxOrder + 1 });
+            this.newItemForm = { name: '', categoryId: '', supplierName: '', threshold: 0, mrp: '' };
+            this.showNewItemModal = false;
         },
 
         downloadInwardSupplierReport() {
-            if (this.items.length === 0) return;
-            const formatted = this.items.map(i => ({
-                "Primary Supplier": i.supplier_name || "General Vendor",
-                "Item Name": i.name || "N/A",
-                "Current Balance": i.stock || 0
-            }));
-            const ws = XLSX.utils.json_to_sheet(formatted);
+            const inwards = this.allRawLogs.filter(l => l.type === 'INWARD' && l.created_at);
+            if (!inwards.length) return alert("No inward data available.");
+
+            const dateGroups = {};
+            inwards.forEach(log => {
+                const dateKey = extractLocalDateKey(log.created_at);
+                if (!dateKey) return;
+                if (!dateGroups[dateKey]) dateGroups[dateKey] = [];
+                dateGroups[dateKey].push(log);
+            });
+
+            const sortedDates = Object.keys(dateGroups).sort();
+            if (!sortedDates.length) return alert("No dated inward records found.");
+
             const wb = XLSX.utils.book_new();
-            XLSX.utils.book_append_sheet(wb, ws, "Suppliers");
-            XLSX.writeFile(wb, "JewelD_Suppliers_Ledger.xlsx");
+
+            sortedDates.forEach(dateKey => {
+                const dayLogs = dateGroups[dateKey];
+                const sheetName = formatSheetDate(dateKey);
+
+                const supplierGroups = {};
+                dayLogs.forEach(log => {
+                    const supName = (log.supplier_name || 'General Vendor').trim();
+                    if (!supplierGroups[supName]) supplierGroups[supName] = [];
+                    supplierGroups[supName].push(log);
+                });
+
+                const sheetMatrix = [];
+
+                Object.keys(supplierGroups).sort().forEach((supName, supIdx) => {
+                    if (supIdx > 0) sheetMatrix.push([]);
+
+                    sheetMatrix.push([`Supplier: ${supName.toUpperCase()}`, null, null, null]);
+                    sheetMatrix.push(["ITEM NAME", "QUANTITY RECEIVED", "UNIT PRICE", "TOTAL VALUATION"]);
+
+                    let supplierTotalValuation = 0;
+
+                    supplierGroups[supName].forEach(log => {
+                        const linkedItem = this.items.find(i => String(i.id) === String(log.item_id)) || {};
+                        const itemName = linkedItem.name || log.item_name || 'Unknown Item';
+                        const qty = parseFloat(log.qty) || 0;
+                        const price = (log.unit_price !== undefined && log.unit_price !== null && log.unit_price !== '') 
+                            ? parseFloat(log.unit_price) 
+                            : (parseFloat(linkedItem.mrp) || 0);
+                        const val = Math.round(qty * price * 100) / 100;
+
+                        supplierTotalValuation += val;
+
+                        sheetMatrix.push([
+                            itemName,
+                            formatShortQty(qty, itemName),
+                            price,
+                            val
+                        ]);
+                    });
+
+                    sheetMatrix.push([null, null, "GRAND TOTAL:", supplierTotalValuation]);
+                });
+
+                const ws = XLSX.utils.aoa_to_sheet(sheetMatrix);
+                ws['!cols'] = [
+                    { wch: 32 },
+                    { wch: 20 },
+                    { wch: 15 },
+                    { wch: 20 }
+                ];
+
+                XLSX.utils.book_append_sheet(wb, ws, sheetName);
+            });
+
+            const now = new Date();
+            const monthYear = now.toLocaleString('en-US', { month: 'short', year: 'numeric' }).replace(' ', '_');
+            XLSX.writeFile(wb, `Monthly_Inward_Breakdown_Report_${monthYear}.xlsx`);
         },
 
-        // FIXED LOGOUT REBOOTH REGISTER PIPELINE
-        logout() {
-            this.isAuthenticated = false;
-            this.currentUsername = '';
-            this.currentRole = 'readonly';
-            this.ready = false;
-            this.loginForm.username = '';
-            this.loginForm.password = '';
-            this.loginError = '';
-            
-            // Forces clean state reconstruction
-            window.location.reload();
-        },
+        downloadExcelReport() {
+            if (!this.allRawLogs || !this.allRawLogs.length) return alert("No transaction logs available.");
 
-        verifyLogin() { 
-            this.isAuthenticated = true; 
-            this.currentUsername = this.loginForm.username || "Operator";
-            this.currentRole = "admin";
-            this.ready = true;
-        },
-        addInward() {}, deductOutward() {}, addItemToOrder() {}, removeOrderBasketItem() {},
-        sendWhatsAppOrder() {}, approveIncomingOrder() {}, declineIncomingOrder() {}, purgeItem() {}
-    }));
-});
+            const monthGroups = {};
+            this.allRawLogs.forEach(log => {
+                const dateKey = extractLocalDateKey(log.created_at);
+                if (!dateKey) return;
+                const monthKey = dateKey.slice(0, 7);
+                if (!monthGroups[monthKey]) monthGroups[monthKey] = [];
+                monthGroups[monthKey].push({ ...log, dateKey });
+            });
+
+            const sortedMonths = Object.keys(monthGroups).sort();
+            if (!sortedMonths.length) return alert("No dated logs available to export.");
+
+            const wb = XLSX.utils.book_new();
+
+            sortedMonths.forEach(monthKey => {
+                const logsInMonth = monthGroups[monthKey];
+                const [year, month] = monthKey.split('-');
+                const monthName = new Date(parseInt(year), parseInt(month) - 1, 1).toLocaleString('en-US', { month: 'short', year: 'numeric' }).replace(' ', '_');
+
+                const dayItemMap = {};
+                logsInMonth.forEach(log => {
+                    const day = log.dateKey;
+                    const itemId = String(log.item_id || log.item_name);
+
+                    if (!dayItemMap[day]) dayItemMap[day] = {};
+                    if (!dayItemMap[day][itemId]) {
+                        const linkedItem = this.items.find(i => String(i.id) === String(log.item_id));
+                        dayItemMap[day][itemId] = {
+                            name: linkedItem ? linkedItem.name : (log.item_name || 'Unknown Item'),
+                            inwardTotal: 0,
+                            deptOutward: {}
+                        };
+                    }
+
+                    const qty = parseFloat(log.qty) || 0;
+                    if (log.type === 'INWARD') {
+                        dayItemMap[day][itemId].inwardTotal += qty;
+                    } else if (log.type === 'OUTWARD') {
+                        const dept = (log.department || 'General').trim();
+                        dayItemMap[day][itemId].deptOutward[dept] = (dayItemMap[day][itemId].deptOutward[dept] || 0) + qty;
+                    }
+                });
+
+                const sheetMatrix = [];
+                const sortedDays = Object.keys(dayItemMap).sort();
+
+                sortedDays.forEach((dayKey, idx) => {
+                    if (idx > 0) sheetMatrix.push([]);
+
+                    sheetMatrix.push([`=== DATE: ${dayKey} (${formatSheetDate(dayKey)}) ===`, null, null]);
+                    sheetMatrix.push(["ITEM NAME", "INWARD", "OUTWARD (BY DEPARTMENT)"]);
+
+                    const itemsOnDay = Object.values(dayItemMap[dayKey]).sort((a, b) => a.name.localeCompare(b.name));
+
+                    itemsOnDay.forEach(entry => {
+                        const inwardStr = entry.inwardTotal > 0 ? `+${formatShortQty(entry.inwardTotal, entry.name)}` : '-';
+                        const deptParts = Object.entries(entry.deptOutward).map(([dept, qty]) => {
+                            return `-${formatShortQty(qty, entry.name)} (${dept})`;
+                        });
+                        const outwardStr = deptParts.length > 0 ? deptParts.join(', ') : '-';
+
+                        sheetMatrix.push([
+                            entry.name,
+                            inwardStr,
+                            outwardStr
+                        ]);
+                    });
+                });
+
+                const ws = XLSX.utils.aoa_to_sheet(sheetMatrix);
+                ws['!cols'] = [
+                    { wch: 30 },
+                    { wch: 18 },
+                    { wch: 45 }
+                ];
+
+                XLSX.utils.book_append_sheet(wb, ws, monthName.slice(0, 31));
+            });
+
+            XLSX.writeFile(wb, `Stock_Movement_Report_${new Date().toISOString().slice(0, 10)}.xlsx`);
+        }
+    };
+}
+
+window.stockApp = stockApp;
+if (window.Alpine) {
+    window.Alpine.data('stockApp', stockApp);
+} else {
+    document.addEventListener('alpine:init', () => {
+        window.Alpine.data('stockApp', stockApp);
+    });
+}
